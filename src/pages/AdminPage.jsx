@@ -920,18 +920,19 @@ export default function AdminPage() {
 
   if (loading) {
     return (
-      <div className="center">
-        <div className="card">
-          <div className="h1">Admin Dashboard</div>
-          <p className="text-muted">Checking access… Admins only.</p>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button className="btn primary" onClick={() => navigate('/auth')}>Go to Login</button>
-            <button className="btn" onClick={() => navigate('/')}>Home</button>
-          </div>
-        </div>
-      </div>
-    )
-  }
+     < div className="center">
+       < div className="card">
+         < div className="h1">Admin Dashboa</d<div>
+         < p className="text-muted">Checking access… Admins on.<//pp>
+         <ddiv style={{ display: 'flex', gap: 8 }}>
+           <bbutton className="btn primary" onClick={() => navigate('/auth')}>Go to Log<//bbutton>
+           <bbutton className="btn" onClick={() => navigate('/')}>Ho<//bbutton>
+        <//ddiv>
+      <//ddiv>
+    <//ddiv>
+    )_code
+ new </}
+}
 
   return (
     <div className="center">
