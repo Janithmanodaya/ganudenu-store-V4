@@ -43,13 +43,37 @@ class Router
             $params = $this->matchPath($r['pattern'], $path);
             if ($params === null) continue;
 
-            // Rate limit per route group
+            // Rate limit per route group with defaults when env missing
             $group = $r['opts']['rate_group'] ?? null;
             if ($group) {
-                $max = (int) getenv("RATE_{$group}_MAX");
-                $win = (int) getenv("RATE_{$group}_WINDOW_MS");
-                if ($max && $win) {
-                    if (!RateLimiter::check(strtolower($group), $max, $win)) {
+                $gUpper = strtoupper($group);
+                $defaults = [
+                    'GLOBAL' => ['max' => 120, 'win' => 60000],
+                    'AUTH' => ['max' => 60, 'win' => 60000],
+                    'ADMIN' => ['max' => 90, 'win' => 60000],
+                    'LISTINGS' => ['max' => 60, 'win' => 60000],
+                ];
+                $maxEnv = getenv("RATE_{$gUpper}_MAX");
+                $winEnv = getenv("RATE_{$gUpper}_WINDOW_MS");
+                $max = ($maxEnv !== false) ? (int) $maxEnv : null;
+                $win = ($winEnv !== false) ? (int) $winEnv : null;
+                if (isset($defaults[$gUpper])) {
+                    $def = $defaults[$gUpper];
+                    if ($max === null) {
+                        $max = (int) $def['max'];
+                        @putenv("RATE_{$gUpper}_MAX={$max}");
+                        $_ENV["RATE_{$gUpper}_MAX"] = (string)$max;
+                    }
+                    if ($win === null) {
+                        $win = (int) $def['win'];
+                        @putenv("RATE_{$gUpper}_WINDOW_MS={$win}");
+                        $_ENV["RATE_{$gUpper}_WINDOW_MS"] = (string)$win;
+                    }
+                }
+                $maxVal = (int) ($max ?? 0);
+                $winVal = (int) ($win ?? 0);
+                if ($maxVal && $winVal) {
+                    if (!RateLimiter::check(strtolower($gUpper), $maxVal, $winVal)) {
                         http_response_code(429);
                         header('Content-Type: application/json');
                         echo json_encode(['error' => 'Too Many Requests']);

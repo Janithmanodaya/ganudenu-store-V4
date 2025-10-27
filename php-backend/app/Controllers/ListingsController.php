@@ -444,7 +444,23 @@ class ListingsController
         if ($selectedCategory !== 'Job' && count($filesArr) > $maxFiles) { \json_response(['error' => 'Images: min 1, max ' . $maxFiles . '.'], 400); return; }
         foreach ($filesArr as $f) {
             if ($f['size'] > 5 * 1024 * 1024) { \json_response(['error' => 'File ' . $f['name'] . ' exceeds 5MB.'], 400); return; }
-            if (strpos((string)$f['type'], 'image/') !== 0) { \json_response(['error' => 'File ' . $f['name'] . ' is not an image.'], 400); return; }
+            $typeLower = strtolower((string)($f['type'] ?? ''));
+            if ($typeLower === '' || strpos($typeLower, 'image/') !== 0) { \json_response(['error' => 'File ' . $f['name'] . ' is not an image.'], 400); return; }
+            // Explicitly block SVG uploads (stored XSS risk)
+            if ($typeLower === 'image/svg+xml' || str_ends_with(strtolower((string)($f['name'] ?? '')), '.svg')) {
+                \json_response(['error' => 'SVG images are not allowed.'], 400); return;
+            }
+            // Basic magic-number signature checks: permit JPEG, PNG, WEBP
+            $buf = @file_get_contents($f['tmp_name'], false, null, 0, 12);
+            $isJpeg = $buf && strlen($buf) >= 3 && ord($buf[0]) === 0xFF && ord($buf[1]) === 0xD8 && ord($buf[2]) === 0xFF;
+            $isPng = $buf && strlen($buf) >= 8 && ord($buf[0]) === 0x89 && ord($buf[1]) === 0x50 && ord($buf[2]) === 0x4E && ord($buf[3]) === 0x47 && ord($buf[4]) === 0x0D && ord($buf[5]) === 0x0A && ord($buf[6]) === 0x1A && ord($buf[7]) === 0x0A;
+            $isWebp = $buf && strlen($buf) >= 12 && substr($buf, 0, 4) === 'RIFF' && substr($buf, 8, 4) === 'WEBP';
+            // Guard against text/XML masquerading as images
+            $looksText = $buf && (substr($buf, 0, 1) === '<' || stripos($buf, '<svg') !== false);
+            if ($looksText) { \json_response(['error' => 'Invalid image format.'], 400); return; }
+            if (!$isJpeg && !$isPng && !$isWebp) {
+                \json_response(['error' => 'Unsupported image format. Use JPG, PNG, or WEBP.'], 400); return;
+            }
         }
 
         // Store images (best-effort WebP)
@@ -978,7 +994,22 @@ class ListingsController
         if ($cat !== 'Job' && ($currentCount + count($filesArr)) > $maxFiles) { \json_response(['error' => 'Too many images. Max ' . $maxFiles . '.'], 400); return; }
         foreach ($filesArr as $f) {
             if ($f['size'] > 5 * 1024 * 1024) { \json_response(['error' => 'File ' . $f['name'] . ' exceeds 5MB.'], 400); return; }
-            if (strpos((string)$f['type'], 'image/') !== 0) { \json_response(['error' => 'File ' . $f['name'] . ' is not an image.'], 400); return; }
+            $typeLower = strtolower((string)($f['type'] ?? ''));
+            if ($typeLower === '' || strpos($typeLower, 'image/') !== 0) { \json_response(['error' => 'File ' . $f['name'] . ' is not an image.'], 400); return; }
+            // Explicitly block SVG uploads (stored XSS risk)
+            if ($typeLower === 'image/svg+xml' || str_ends_with(strtolower((string)($f['name'] ?? '')), '.svg')) {
+                \json_response(['error' => 'SVG images are not allowed.'], 400); return;
+            }
+            // Basic magic-number signature checks: permit JPEG, PNG, WEBP
+            $buf = @file_get_contents($f['tmp_name'], false, null, 0, 12);
+            $isJpeg = $buf && strlen($buf) >= 3 && ord($buf[0]) === 0xFF && ord($buf[1]) === 0xD8 && ord($buf[2]) === 0xFF;
+            $isPng = $buf && strlen($buf) >= 8 && ord($buf[0]) === 0x89 && ord($buf[1]) === 0x50 && ord($buf[2]) === 0x4E && ord($buf[3]) === 0x47 && ord($buf[4]) === 0x0D && ord($buf[5]) === 0x0A && ord($buf[6]) === 0x1A && ord($buf[7]) === 0x0A;
+            $isWebp = $buf && strlen($buf) >= 12 && substr($buf, 0, 4) === 'RIFF' && substr($buf, 8, 4) === 'WEBP';
+            $looksText = $buf && (substr($buf, 0, 1) === '<' || stripos($buf, '<svg') !== false);
+            if ($looksText) { \json_response(['error' => 'Invalid image format.'], 400); return; }
+            if (!$isJpeg && !$isPng && !$isWebp) {
+                \json_response(['error' => 'Unsupported image format. Use JPG, PNG, or WEBP.'], 400); return;
+            }
         }
 
         $uploads = __DIR__ . '/../../../data/uploads';

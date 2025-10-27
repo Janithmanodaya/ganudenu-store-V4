@@ -214,7 +214,7 @@ if ($m['enabled']) {
             exit;
         }
         $domain = getenv('PUBLIC_DOMAIN') ?: 'https://ganudenu.store';
-        $html = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Maintenance - Ganudenu</title><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"></head><body><h1>We’re performing maintenance</h1><p>Ganudenu is temporarily unavailable while we upgrade our systems.</p><p>If you are an administrator, manage maintenance from the <a href=\"{$domain}/janithmanodya\">Admin Panel</a>.</p></body></html>";
+        $html = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Maintenance - Ganudenu</title><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"></head><body><h1>We’re performing maintenance</h1><p>Ganudenu is temporarily unavailable while we upgrade our systems.</p><p>If you are an administrator, manage maintenance from the <a href=\"{$domain}/admin\">Admin Panel</a>.</p></body></html>";
         header('Content-Type: text/html'); http_response_code(503); echo $html; exit;
     }
 }
