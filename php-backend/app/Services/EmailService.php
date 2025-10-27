@@ -11,13 +11,13 @@ class EmailService
             return ['ok' => true, 'dev' => true];
         }
 
-        // SMTP via PHPMailer if configured
-        $host = getenv('SMTP_HOST') ?: '';
-        $user = getenv('SMTP_USER') ?: '';
-        $pass = getenv('SMTP_PASS') ?: '';
-        $port = (int) (getenv('SMTP_PORT') ?: 587);
-        $secure = strtolower(getenv('SMTP_SECURE') ?: '') === 'true';
-        $from = getenv('SMTP_FROM') ?: 'no-reply@example.com';
+        // SMTP via PHPMailer if configured (prefer SecureConfig like Node)
+        $host = \App\Services\SecureConfig::getSecret('smtp_host') ?? '';
+        $user = \App\Services\SecureConfig::getSecret('smtp_user') ?? '';
+        $pass = \App\Services\SecureConfig::getSecret('smtp_pass') ?? '';
+        $port = (int) (\App\Services\SecureConfig::getSecret('smtp_port') ?? (getenv('SMTP_PORT') ?: 587));
+        $secure = strtolower((\App\Services\SecureConfig::getSecret('smtp_secure') ?? (getenv('SMTP_SECURE') ?: ''))) === 'true';
+        $from = \App\Services\SecureConfig::getSecret('smtp_from') ?? (getenv('SMTP_FROM') ?: 'no-reply@example.com');
 
         if ($host && $user && $pass) {
             try {
@@ -59,9 +59,9 @@ class EmailService
             }
         }
 
-        // Brevo HTTP fallback
-        $apiKey = getenv('BREVO_API_KEY') ?: '';
-        $login = getenv('BREVO_LOGIN') ?: '';
+        // Brevo HTTP fallback (prefer SecureConfig like Node)
+        $apiKey = \App\Services\SecureConfig::getSecret('brevo_api_key') ?? (getenv('BREVO_API_KEY') ?: '');
+        $login = \App\Services\SecureConfig::getSecret('brevo_login') ?? (getenv('BREVO_LOGIN') ?: '');
         if (!$apiKey || !$login) {
             $err = 'Email provider not configured';
             if (self::shouldSimulateOnFailure()) {
@@ -252,11 +252,12 @@ class EmailService
         return (string) random_int(1000, 9999);
     }
  
-
+    // Parity with Node: GN-<base36 timestamp>-<base36 random> (3 chars), uppercase
     public static function generateUserUID(): string
     {
-        $ts = dechex(time());
-        $rnd = substr(strtoupper(bin2hex(random_bytes(3))), 0, 6);
-        return 'GN-' . strtoupper($ts) . '-' . $rnd;
+        $ts = strtoupper(base_convert((string)time(), 10, 36));
+        $rand = random_int(0, 36*36*36 - 1);
+        $rnd = strtoupper(str_pad(base_convert((string)$rand, 10, 36), 3, '0', STR_PAD_LEFT));
+        return 'GN-' . $ts . '-' . $rnd;
     }
 }
