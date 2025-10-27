@@ -89,6 +89,119 @@ class ListingsController
         $pdo->exec("CREATE INDEX IF NOT EXISTS idx_listings_owner ON listings(owner_email)");
     }
 
+    // --- Recommendation helpers (server-side parity with client) ---
+
+    private static function tokenize(string $s): array
+    {
+        $t = strtolower(preg_replace('/[^a-z0-9\\s]/', ' ', $s));
+        $parts = preg_split('/\\s+/', $t) ?: [];
+        $stop = ['the','and','for','with','from','this','that','your','you','our','in','on','to','of','a','an','by','at','or','as','is','are','was','were','new','like','very','good','best','great'];
+        $stopSet = array_fill_keys($stop, true);
+        $out = [];
+        foreach ($parts as $w) {
+            if (strlen($w) >= 3 && !isset($stopSet[$w])) $out[$w] = true;
+        }
+        return array_keys($out);
+    }
+
+    private static function parseListingRow(array $listing): array
+    {
+        $sj = json_decode((string)($listing['structured_json'] ?? '{}'), true) ?: [];
+        $main_category = trim((string)($listing['main_category'] ?? ''));
+        $sub_category = trim((string)($sj['sub_category'] ?? ''));
+        $model_name = trim((string)($sj['model_name'] ?? ''));
+        $manufacturer = trim((string)($sj['manufacturer'] ?? ''));
+        if ($manufacturer === '' && $model_name !== '') {
+            $brands = ['honda','yamaha','suzuki','bajaj','tvs','hero','kawasaki','mahindra','royal enfield','vespa','toyota','nissan','mazda','mitsubishi','hyundai','kia','renault','peugeot','ford','isuzu','subaru'];
+            $low = strtolower($model_name);
+            foreach ($brands as $b) { if (preg_match('/\\b' . preg_quote($b, '/') . '\\b/i', $low)) { $manufacturer = implode(' ', array_map(fn($x) => ucfirst($x), explode(' ', $b))); break; } }
+        }
+        $location = trim((string)($listing['location'] ?? ''));
+        $price = isset($listing['price']) ? (float)$listing['price'] : null;
+        $year = isset($sj['manufacture_year']) ? (int)$sj['manufacture_year'] : null;
+        $title = (string)($listing['title'] ?? '');
+        $desc = (string)($listing['seo_description'] ?? ($listing['description'] ?? ''));
+        $tokens = array_values(array_unique(array_merge(self::tokenize($title), self::tokenize($desc), self::tokenize($model_name), self::tokenize($sub_category), self::tokenize($manufacturer))));
+        $urgent = !!($listing['is_urgent'] ?? $listing['urgent'] ?? false);
+        $created_at = !empty($listing['created_at']) ? strtotime((string)$listing['created_at']) * 1000 : null;
+        $views = isset($listing['views']) ? (int)$listing['views'] : 0;
+        return compact('main_category','sub_category','model_name','manufacturer','location','price','year','tokens','urgent','created_at','views');
+    }
+
+    private static function priceBucket($n): ?string
+    {
+        if ($n === null) return null;
+        $v = (float)$n;
+        if (!is_finite($v) || $v <= 0) return null;
+        if ($v <= 100_000) return '0-100k';
+        if ($v <= 500_000) return '100k-500k';
+        if ($v <= 1_000_000) return '500k-1m';
+        if ($v <= 3_000_000) return '1m-3m';
+        return '3m+';
+    }
+
+    private static function scoreListing(array $it, array $context): float
+    {
+        $f = self::parseListingRow($it);
+        $score = 0.0;
+
+        // Keyword affinity against context tokens (base listing title+desc+model+sub+manufacturer)
+        $ctxTokens = $context['tokens'] ?? [];
+        if (!empty($ctxTokens)) {
+            $overlap = 0;
+            $set = array_fill_keys($f['tokens'], true);
+            foreach ($ctxTokens as $t) { if (isset($set[$t])) $overlap++; }
+            $score += $overlap * 1.4;
+        }
+
+        // Category/sub/model/location exact matches
+        if (!empty($context['main_category']) && $f['main_category'] === $context['main_category']) $score += 1.4;
+        if (!empty($context['sub_category']) && $f['sub_category'] === $context['sub_category']) $score += 5.0;
+        if (!empty($context['model_name']) && $f['model_name'] === $context['model_name']) $score += 4.2;
+        if (!empty($context['location']) && strtolower($f['location']) === strtolower((string)$context['location'])) $score += 2.2;
+
+        // Price bucket + closeness
+        $pb = self::priceBucket($f['price']);
+        if (!empty($context['price_bucket']) && $pb === $context['price_bucket']) $score += 1.3;
+        if (isset($context['targetPrice']) && is_finite((float)$context['targetPrice']) && is_finite((float)$f['price'])) {
+            $tp = (float)$context['targetPrice'];
+            $diff = abs($f['price'] - $tp);
+            $rel = $tp > 0 ? max(0.0, 1.0 - ($diff / $tp)) : 0.0;
+            $score += $rel * 3.0;
+        }
+
+        // Year closeness
+        if (isset($context['targetYear']) && is_finite((float)$context['targetYear']) && is_finite((float)$f['year'])) {
+            $dy = abs(((int)$context['targetYear']) - ((int)$f['year']));
+            $yscore = max(0.0, 1.0 - min(1.0, $dy / 5.0));
+            $score += $yscore * 2.0;
+        }
+
+        // Recency boost (half-life ~14 days)
+        if (!empty($f['created_at'])) {
+            $days = max(0.0, ((microtime(true) * 1000) - $f['created_at']) / 86_400_000.0);
+            $recency = max(0.0, 1.0 - min(1.0, $days / 14.0));
+            $score += $recency * 5.0;
+        }
+
+        // Urgent boost
+        if ($f['urgent']) $score += 3.2;
+
+        // Trending views boost
+        if (is_finite((float)$f['views']) && $f['views'] > 0) {
+            $v = log10(1.0 + max(0.0, (float)$f['views']));
+            $score += $v * 2.0;
+        }
+
+        // Slight preference for lower price
+        if (is_finite((float)$f['price'])) {
+            $pr = log10(max(1.0, (float)$f['price']));
+            $score += max(0.0, 5.0 - $pr) * 0.35;
+        }
+
+        return (float)$score;
+    }
+
     public static function list(): void
     {
         self::ensureSchema();
@@ -335,6 +448,115 @@ class ListingsController
             \json_response($listing + ['thumbnail_url' => $thumbnail_url, 'medium_url' => $medium_url, 'og_image_url' => $og_image_url, 'images' => $images]);
         } catch (\Throwable $e) {
             \json_response(['error' => 'Failed to fetch listing'], 500);
+        }
+    }
+
+    // --- Similar listings (server-side recommendation) ---
+    public static function similar(array $params): void
+    {
+        self::ensureSchema();
+        try {
+            $id = isset($_GET['id']) ? (int)$_GET['id'] : (int)($params['id'] ?? 0);
+            $limit = max(1, min(50, (int)($_GET['limit'] ?? 6)));
+            if (!$id) { \json_response(['results' => []]); return; }
+            $base = DB::one("SELECT id, main_category, title, description, seo_description, structured_json, price, location, is_urgent, views, created_at FROM listings WHERE id = ?", [$id]);
+            if (!$base) { \json_response(['results' => []]); return; }
+
+            $f = self::parseListingRow($base);
+            $context = [
+                'main_category' => $f['main_category'],
+                'sub_category' => $f['sub_category'],
+                'model_name' => $f['model_name'],
+                'location' => $f['location'],
+                'price_bucket' => self::priceBucket($f['price']),
+                'targetPrice' => $f['price'],
+                'targetYear' => $f['year'],
+                'tokens' => $f['tokens'],
+            ];
+
+            // Build candidate pools: trending in category + latest in category (optionally filtered by sub/model)
+            $paramsCat = [$f['main_category']];
+            $where = "status = 'Approved' AND main_category = ?";
+            $filtersSql = "";
+            if ($f['sub_category'] !== '') { $filtersSql .= " AND LOWER(json_extract(structured_json,'$.sub_category')) = LOWER(?)"; $paramsCat[] = $f['sub_category']; }
+            if ($f['model_name'] !== '') { $filtersSql .= " AND LOWER(json_extract(structured_json,'$.model_name')) = LOWER(?)"; $paramsCat[] = $f['model_name']; }
+
+            $trSql = "SELECT id, main_category, title, description, seo_description, structured_json, price, pricing_type, location, thumbnail_path, status, valid_until, created_at, is_urgent, views
+                      FROM listings
+                      WHERE {$where}{$filtersSql}
+                      ORDER BY views DESC, created_at DESC
+                      LIMIT 120";
+            $ltSql = "SELECT id, main_category, title, description, seo_description, structured_json, price, pricing_type, location, thumbnail_path, status, valid_until, created_at, is_urgent, views
+                      FROM listings
+                      WHERE {$where}{$filtersSql}
+                      ORDER BY created_at DESC
+                      LIMIT 120";
+
+            $tr = DB::all($trSql, $paramsCat);
+            $lt = DB::all($ltSql, $paramsCat);
+
+            // Merge, dedupe, exclude base id
+            $pool = [];
+            $seen = [];
+            foreach ([$tr, $lt] as $src) {
+                foreach ($src as $row) {
+                    $rid = (int)$row['id'];
+                    if ($rid === $id) continue;
+                    if (isset($seen[$rid])) continue;
+                    $seen[$rid] = true;
+                    $pool[] = $row;
+                }
+            }
+            if (empty($pool)) { \json_response(['results' => []]); return; }
+
+            // Rank with scoring + explicit bonuses for exact sub/model/location
+            $scored = [];
+            foreach ($pool as $row) {
+                $g = self::parseListingRow($row);
+                $bonus = 0.0;
+                if ($g['sub_category'] && $f['sub_category'] && $g['sub_category'] === $f['sub_category']) $bonus += 5.0;
+                if ($g['model_name'] && $f['model_name'] && $g['model_name'] === $f['model_name']) $bonus += 4.2;
+                if ($g['location'] && $f['location'] && strtolower($g['location']) === strtolower($f['location'])) $bonus += 2.2;
+                // token overlap bonus already handled in scoreListing via context tokens
+                $baseScore = self::scoreListing($row, $context);
+                $scored[] = ['item' => $row, 'score' => $baseScore + $bonus];
+            }
+            usort($scored, fn($a, $b) => ($b['score'] <=> $a['score']));
+
+            $out = [];
+            $seenModel = [];
+            foreach ($scored as $s) {
+                if (count($out) >= $limit) break;
+                $sj = json_decode((string)($s['item']['structured_json'] ?? '{}'), true) ?: [];
+                $mk = strtolower((string)($sj['model_name'] ?? ''));
+                $cnt = $seenModel[$mk] ?? 0;
+                if ($cnt >= 3) continue;
+                $seenModel[$mk] = $cnt + 1;
+                $out[] = $s['item'];
+            }
+
+            // Hydrate thumbnail/small images for cards
+            $firstStmt = DB::conn()->prepare("SELECT path, medium_path FROM listing_images WHERE listing_id = ? ORDER BY id ASC LIMIT 1");
+            $listStmt = DB::conn()->prepare("SELECT path, medium_path FROM listing_images WHERE listing_id = ? ORDER BY id ASC LIMIT 5");
+            $final = [];
+            foreach ($out as $r) {
+                $firstStmt->execute([(int)$r['id']]);
+                $first = $firstStmt->fetch(\PDO::FETCH_ASSOC) ?: null;
+                $listStmt->execute([(int)$r['id']]);
+                $imgs = $listStmt->fetchAll(\PDO::FETCH_ASSOC) ?: [];
+                $thumbnail_url = self::filePathToUrl($r['thumbnail_path']) ?: self::filePathToUrl($first['medium_path'] ?? ($first['path'] ?? null));
+                $small_images = array_values(array_filter(array_map(function ($x) { return self::filePathToUrl($x['medium_path'] ?? $x['path']); }, $imgs)));
+                $final[] = $r + [
+                    'thumbnail_url' => $thumbnail_url,
+                    'small_images' => $small_images,
+                    'urgent' => !!($r['is_urgent'] ?? false),
+                    'is_urgent' => !!($r['is_urgent'] ?? false),
+                ];
+            }
+
+            \json_response(['results' => $final]);
+        } catch (\Throwable $e) {
+            \json_response(['results' => []]);
         }
     }
 
