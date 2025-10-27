@@ -148,6 +148,16 @@ export default function VerifyListingPage() {
     const file = (e.target.files && e.target.files[0]) || null
     e.target.value = ''
     if (!file) return
+
+    // Block SVG uploads (backend rejects too)
+    const nameLower = (file && file.name) ? String(file.name).toLowerCase() : ''
+    const isSvg = (file && file.type && String(file.type).toLowerCase() === 'image/svg+xml') || nameLower.endsWith('.svg')
+    if (isSvg) {
+      setStatus('SVG images are not allowed. Please choose PNG, JPEG, WebP, GIF, or AVIF.')
+      pendingSlotRef.current = null
+      return
+    }
+
     const idx = pendingSlotRef.current ?? 0
     try {
       const user = JSON.parse(localStorage.getItem('user') || 'null')
@@ -932,7 +942,7 @@ export default function VerifyListingPage() {
               <input
                 ref={slotFileInputRef}
                 type="file"
-                accept="image/*"
+                accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
                 style={{ display: 'none' }}
                 onChange={onSlotFileChange}
               />

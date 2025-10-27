@@ -173,6 +173,14 @@ export default function NewListingPage() {
     e.target.value = ''
     if (!file) return
 
+    // Block SVG uploads (backend rejects too)
+    const nameLower = (file && file.name) ? String(file.name).toLowerCase() : ''
+    const isSvg = (file && file.type && String(file.type).toLowerCase() === 'image/svg+xml') || nameLower.endsWith('.svg')
+    if (isSvg) {
+      setStatus('SVG images are not allowed. Please choose PNG, JPEG, WebP, GIF, or AVIF.')
+      return
+    }
+
     if (file.size > 5 * 1024 * 1024) {
       setStatus(`File ${file.name} exceeds 5MB limit.`)
       return
@@ -289,7 +297,7 @@ export default function NewListingPage() {
         <input
           ref={hiddenFileInput}
           type="file"
-          accept="image/*"
+          accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
           style={{ display: 'none' }}
           onChange={onHiddenFileChange}
         />
