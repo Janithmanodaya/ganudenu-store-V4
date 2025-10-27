@@ -7,6 +7,27 @@ use App\Services\GeminiService;
 
 class ListingsController
 {
+    // In-memory micro-cache (process-local)
+    private static array $cache = [];
+
+    private static function cacheGet(string $key)
+    {
+        $now = (int) (microtime(true) * 1000);
+        if (!isset(self::$cache[$key])) return null;
+        $item = self::$cache[$key];
+        if ($item['expires'] <= $now) {
+            unset(self::$cache[$key]);
+            return null;
+        }
+        return $item['value'];
+    }
+
+    private static function cacheSet(string $key, $value, int $ttlMs = 15000): void
+    {
+        $ttlMs = max(1000, (int)$ttlMs);
+        self::$cache[$key] = ['value' => $value, 'expires' => (int)(microtime(true) * 1000) + $ttlMs];
+    }
+
     private static function filePathToUrl(?string $p): ?string
     {
         if (!$p) return null;
@@ -72,6 +93,15 @@ class ListingsController
     {
         self::ensureSchema();
         try {
+            // Micro-cache 15s per-URL
+            $cacheKey = 'list:' . (string)($_SERVER['REQUEST_URI'] ?? '');
+            $cached = self::cacheGet($cacheKey);
+            if ($cached !== null) {
+                header('Cache-Control: public, max-age=15');
+                \json_response($cached);
+                return;
+            }
+
             $category = $_GET['category'] ?? null;
             $sortBy = $_GET['sortBy'] ?? null;
             $order = strtoupper($_GET['order'] ?? 'DESC');
@@ -109,8 +139,10 @@ class ListingsController
                 $r['urgent'] = !!$r['is_urgent'];
                 $results[] = $r;
             }
+            $payload = ['results' => $results];
+            self::cacheSet($cacheKey, $payload, 15000);
             header('Cache-Control: public, max-age=15');
-            \json_response(['results' => $results]);
+            \json_response($payload);
         } catch (\Throwable $e) {
             \json_response(['error' => 'Failed to fetch listings'], 500);
         }
@@ -120,6 +152,15 @@ class ListingsController
     {
         self::ensureSchema();
         try {
+            // Micro-cache 15s per-URL
+            $cacheKey = 'search:' . (string)($_SERVER['REQUEST_URI'] ?? '');
+            $cached = self::cacheGet($cacheKey);
+            if ($cached !== null) {
+                header('Cache-Control: public, max-age=15');
+                \json_response($cached);
+                return;
+            }
+
             $q = strtolower(trim((string)($_GET['q'] ?? '')));
             $keyword_mode = strtolower(trim((string)($_GET['keyword_mode'] ?? 'or')));
             $category = (string)($_GET['category'] ?? '');
@@ -184,8 +225,10 @@ class ListingsController
                 $r['small_images'] = $small_images;
                 $results[] = $r;
             }
+            $payload = ['results' => $results, 'page' => $page, 'limit' => $limit];
+            self::cacheSet($cacheKey, $payload, 15000);
             header('Cache-Control: public, max-age=15');
-            \json_response(['results' => $results, 'page' => $page, 'limit' => $limit]);
+            \json_response($payload);
         } catch (\Throwable $e) {
             \json_response(['error' => 'Failed to search listings'], 500);
         }
@@ -195,6 +238,15 @@ class ListingsController
     {
         self::ensureSchema();
         try {
+            // Micro-cache 30s per-URL
+            $cacheKey = 'suggestions:' . (string)($_SERVER['REQUEST_URI'] ?? '');
+            $cached = self::cacheGet($cacheKey);
+            if ($cached !== null) {
+                header('Cache-Control: public, max-age=30');
+                \json_response($cached);
+                return;
+            }
+
             $q = strtolower(trim((string)($_GET['q'] ?? '')));
             if (!$q) { \json_response(['results' => []]); return; }
             $category = trim((string)($_GET['category'] ?? ''));
@@ -224,8 +276,10 @@ class ListingsController
                 if ($model && stripos($model, $q) !== false) $push($model, 'model', $cat);
                 if (count($results) >= 50) break;
             }
+            $payload = ['results' => $results];
+            self::cacheSet($cacheKey, $payload, 30000);
             header('Cache-Control: public, max-age=30');
-            \json_response(['results' => $results]);
+            \json_response($payload);
         } catch (\Throwable $e) {
             \json_response(['error' => 'Failed to load suggestions'], 500);
         }
@@ -303,6 +357,15 @@ class ListingsController
     public static function paymentInfo(array $params): void
     {
         try {
+            // Micro-cache 60s per-ID
+            $cacheKey = 'payment-info:' . (int)($params['id'] ?? 0);
+            $cached = self::cacheGet($cacheKey);
+            if ($cached !== null) {
+                header('Cache-Control: public, max-age=60');
+                \json_response($cached);
+                return;
+            }
+
             $id = (int)($params['id'] ?? 0);
             if (!$id) { \json_response(['error' => 'Invalid ID'], 400); return; }
             $listing = DB::one("SELECT id, title, price, owner_email, status, remark_number, main_category FROM listings WHERE id = ?", [$id]);
@@ -326,8 +389,7 @@ class ListingsController
                 $combined = implode("\n", $lines);
             }
 
-            header('Cache-Control: public, max-age=60');
-            \json_response([
+            $payload = [
                 'ok' => true,
                 'listing' => $listing,
                 'bank_details' => $combined ?: '',
@@ -337,7 +399,10 @@ class ListingsController
                 'whatsapp_number' => $cfg['whatsapp_number'] ?? '',
                 'payment_amount' => $payment_amount,
                 'payments_enabled' => $payments_enabled
-            ]);
+            ];
+            self::cacheSet($cacheKey, $payload, 60000);
+            header('Cache-Control: public, max-age=60');
+            \json_response($payload);
         } catch (\Throwable $e) {
             \json_response(['error' => 'Failed to load payment info'], 500);
         }
@@ -450,17 +515,11 @@ class ListingsController
             if ($typeLower === 'image/svg+xml' || str_ends_with(strtolower((string)($f['name'] ?? '')), '.svg')) {
                 \json_response(['error' => 'SVG images are not allowed.'], 400); return;
             }
-            // Basic magic-number signature checks: permit JPEG, PNG, WEBP
+            // Lightweight magic signature + text guard
             $buf = @file_get_contents($f['tmp_name'], false, null, 0, 12);
-            $isJpeg = $buf && strlen($buf) >= 3 && ord($buf[0]) === 0xFF && ord($buf[1]) === 0xD8 && ord($buf[2]) === 0xFF;
-            $isPng = $buf && strlen($buf) >= 8 && ord($buf[0]) === 0x89 && ord($buf[1]) === 0x50 && ord($buf[2]) === 0x4E && ord($buf[3]) === 0x47 && ord($buf[4]) === 0x0D && ord($buf[5]) === 0x0A && ord($buf[6]) === 0x1A && ord($buf[7]) === 0x0A;
-            $isWebp = $buf && strlen($buf) >= 12 && substr($buf, 0, 4) === 'RIFF' && substr($buf, 8, 4) === 'WEBP';
-            // Guard against text/XML masquerading as images
             $looksText = $buf && (substr($buf, 0, 1) === '<' || stripos($buf, '<svg') !== false);
             if ($looksText) { \json_response(['error' => 'Invalid image format.'], 400); return; }
-            if (!$isJpeg && !$isPng && !$isWebp) {
-                \json_response(['error' => 'Unsupported image format. Use JPG, PNG, or WEBP.'], 400); return;
-            }
+            // Do not reject other image formats here; we will try to convert to WebP, else keep original.
         }
 
         // Store images (best-effort WebP)
@@ -510,6 +569,9 @@ class ListingsController
                     $mime = mime_content_type($f['tmp_name']) ?: '';
                     if (str_contains($mime, 'png')) $ext = '.png';
                     elseif (str_contains($mime, 'webp')) $ext = '.webp';
+                    elseif (str_contains($mime, 'gif')) $ext = '.gif';
+                    elseif (str_contains($mime, 'tiff') || str_contains($mime, 'tif')) $ext = '.tif';
+                    elseif (str_contains($mime, 'avif')) $ext = '.avif';
                     else $ext = '.jpg';
                 }
                 $destOrig = $uploads . '/' . $base . $ext;
@@ -573,12 +635,23 @@ class ListingsController
     public static function draftGet(array $params): void
     {
         self::ensureSchema();
+        // Micro-cache 15s per-id
+        $cacheKey = 'draft-get:' . (int)($params['id'] ?? 0);
+        $cached = self::cacheGet($cacheKey);
+        if ($cached !== null) {
+            header('Cache-Control: public, max-age=15');
+            \json_response($cached);
+            return;
+        }
+
         $id = (int)($params['id'] ?? 0);
         if (!$id) { \json_response(['error' => 'Invalid id'], 400); return; }
         $draft = DB::one("SELECT * FROM listing_drafts WHERE id = ?", [$id]);
         if (!$draft) { \json_response(['error' => 'Not found'], 404); return; }
         $images = DB::all("SELECT id, path, original_name FROM listing_draft_images WHERE draft_id = ? ORDER BY id ASC", [$id]);
-        \json_response(['draft' => $draft, 'images' => $images]);
+        $payload = ['draft' => $draft, 'images' => $images];
+        self::cacheSet($cacheKey, $payload, 15000);
+        \json_response($payload);
     }
 
     public static function draftDelete(array $params): void
@@ -794,12 +867,29 @@ class ListingsController
     public static function myDrafts(): void
     {
         self::ensureSchema();
+        // Accept Bearer or X-User-Email (parity with Node behavior)
         $email = null;
-BearerToken();
+        $tok = JWT::getBearerToken();
         $v = $tok ? JWT::verify($tok) : ['ok' => false];
-        if (!$v['ok']) { \json_response(['error' => 'Missing Authorization bearer token'], 401); return; }
-        $email = strtolower((string)$v['decoded']['email']);
-        $employeeProfile = isset($_GET['employee_profile']) ? (int)$_GET['employee_profile'] : null;
+        if ($v['ok']) {
+            $email = strtolower((string)$v['decoded']['email']);
+        } else {
+            $headerEmail = strtolower(trim((string)($_SERVER['HTTP_X_USER_EMAIL'] ?? '')));
+            if ($headerEmail) {
+                $email = $headerEmail;
+            } else {
+                \json_response(['error' => 'Missing Authorization bearer token or X-User-Email header'], 401);
+                return;
+            }
+        }
+
+        // Support optional employee_profile filter (1/true/yes)
+        $empRaw = strtolower(trim((string)($_GET['employee_profile'] ?? '')));
+        $employeeProfile = null;
+        if ($empRaw !== '') {
+            $employeeProfile = in_array($empRaw, ['1','true','yes'], true) ? 1 : 0;
+        }
+
         $sql = "
           SELECT id, main_category, title, description, owner_email, created_at, employee_profile, resume_file_url
           FROM listing_drafts
@@ -809,7 +899,6 @@ BearerToken();
         if ($employeeProfile !== null) { $sql .= " AND employee_profile = ?"; $params[] = $employeeProfile; }
         $sql .= " ORDER BY id DESC LIMIT 200";
         $rows = DB::all($sql, $params);
-        // Normalize employee_profile to boolean
         foreach ($rows as &$r) { $r['employee_profile'] = !!$r['employee_profile']; }
         \json_response(['results' => $rows]);
     }
@@ -854,26 +943,85 @@ BearerToken();
 
     public static function vehicleSpecs(): void
     {
+        // Align schema to Node: { manufacturer?, engine_capacity_cc?, transmission?, fuel_type?, colour?, mileage_km? }
         $b = \read_body_json();
         $model = trim((string)($b['model_name'] ?? ''));
         $desc = trim((string)($b['description'] ?? ''));
         $sub = trim((string)($b['sub_category'] ?? ''));
-        if (!$model && !$desc) { \json_response(['error' => 'model_name or description required'], 400); return; }
-        // Simple heuristic specs
-        $specs = [
-            'engine' => (preg_match('/(hybrid|electric)/i', $desc) ? 'Hybrid/Electric' : 'Petrol/Diesel'),
-            'transmission' => (preg_match('/auto|automatic/i', $desc) ? 'Automatic' : 'Manual'),
-            'doors' => (preg_match('/2\s*door/i', $desc) ? 2 : 4),
-            'fuel_economy' => (preg_match('/([0-9]{2})\s*km\/l/i', $desc, $m) ? (int)$m[1] . ' km/l' : null),
-            'sub_category' => $sub ?: null,
-            'model_name' => $model ?: null,
-        ];
-        \json_response(['ok' => true, 'specs' => $specs]);
+        if (!$model) { \json_response(['error' => 'model_name is required'], 400); return; }
+
+        $text = trim($model . ' ' . $sub . ' ' . $desc);
+
+        // Manufacturer from a simple brand list
+        $brands = ['Toyota','Honda','Nissan','Mazda','Mitsubishi','Hyundai','Kia','Suzuki','Subaru','Ford','Chevrolet','BMW','Mercedes','Audi','Volkswagen','Peugeot','Renault','Tata','Mahindra','Bajaj','Yamaha','Hero','TVS','Kawasaki','Royal Enfield','Vespa'];
+        $manufacturer = null;
+        foreach ($brands as $br) {
+            if (stripos($text, $br) !== false) { $manufacturer = $br; break; }
+        }
+
+        // Engine capacity (cc)
+        $engine_capacity_cc = null;
+        if (preg_match('/\b([5-9]\d{2}|[1-7]\d{3}|8000)\b/', preg_replace('/[^\d]/', ' ', $text), $m)) {
+            $cc = (int)$m[1];
+            if ($cc >= 50 && $cc <= 8000) $engine_capacity_cc = $cc;
+        }
+
+        // Transmission
+        $transmission = null;
+        $low = strtolower($text);
+        if (strpos($low, 'auto') !== false || strpos($low, 'automatic') !== false) $transmission = 'Automatic';
+        elseif (strpos($low, 'manual') !== false) $transmission = 'Manual';
+        elseif ($sub && stripos($sub, 'bike') !== false) $transmission = 'Manual';
+
+        // Fuel type
+        $fuel_type = null;
+        if (strpos($low, 'diesel') !== false) $fuel_type = 'Diesel';
+        elseif (strpos($low, 'hybrid') !== false) $fuel_type = 'Hybrid';
+        elseif (strpos($low, 'electric') !== false || strpos($low, 'ev') !== false) $fuel_type = 'Electric';
+        elseif (strpos($low, 'petrol') !== false || strpos($low, 'gasoline') !== false || strpos($low, 'benzine') !== false) $fuel_type = 'Petrol';
+
+        // Colour (best-effort from common colors)
+        $colour = null;
+        $colors = ['black','white','silver','grey','gray','blue','red','green','yellow','gold','brown','beige','maroon','orange','purple'];
+        foreach ($colors as $c) {
+            if (preg_match('/\b' . preg_quote($c, '/') . '\b/i', $low)) { $colour = ucfirst($c === 'gray' ? 'Grey' : $c); break; }
+        }
+
+        // Mileage (km)
+        $mileage_km = null;
+        if (preg_match('/\b([0-9]{3,7})\s*(km|kms|kilometers|kilometres)\b/i', $low, $mm)) {
+            $mileage_km = (int)$mm[1];
+        } elseif (preg_match('/\b([0-9]{3,7})\b/', str_replace(',', '', $low), $mm)) {
+            $val = (int)$mm[1];
+            if ($val >= 100 && $val <= 1000000) $mileage_km = $val;
+        }
+        if (is_int($mileage_km)) {
+            $mileage_km = max(0, min(1000000, $mileage_km));
+        }
+
+        $result = [];
+        if ($manufacturer) $result['manufacturer'] = $manufacturer;
+        if ($engine_capacity_cc !== null) $result['engine_capacity_cc'] = $engine_capacity_cc;
+        if ($transmission) $result['transmission'] = $transmission;
+        if ($fuel_type) $result['fuel_type'] = $fuel_type;
+        if ($colour) $result['colour'] = $colour;
+        if ($mileage_km !== null) $result['mileage_km'] = $mileage_km;
+
+        \json_response(['ok' => true, 'specs' => $result]);
     }
 
     public static function filters(): void
     {
         self::ensureSchema();
+        // Micro-cache 60s per-URL
+        $cacheKey = 'filters:' . (string)($_SERVER['REQUEST_URI'] ?? '');
+        $cached = self::cacheGet($cacheKey);
+        if ($cached !== null) {
+            header('Cache-Control: public, max-age=60');
+            \json_response($cached);
+            return;
+        }
+
         $category = trim((string)($_GET['category'] ?? ''));
         if (!$category) { \json_response(['error' => 'category is required'], 400); return; }
 
@@ -938,8 +1086,10 @@ BearerToken();
             $outMap[$k] = array_values(array_slice($vals, 0, 50));
         }
 
+        $payload = ['keys' => $keys, 'valuesByKey' => $outMap];
+        self::cacheSet($cacheKey, $payload, 60000);
         header('Cache-Control: public, max-age=60');
-        \json_response(['keys' => $keys, 'valuesByKey' => $outMap]);
+        \json_response($payload);
     }
 
     private static function requireDraftOwnerEmail(int $draftId): ?string
@@ -1008,20 +1158,13 @@ BearerToken();
             if ($f['size'] > 5 * 1024 * 1024) { \json_response(['error' => 'File ' . $f['name'] . ' exceeds 5MB.'], 400); return; }
             $typeLower = strtolower((string)($f['type'] ?? ''));
             if ($typeLower === '' || strpos($typeLower, 'image/') !== 0) { \json_response(['error' => 'File ' . $f['name'] . ' is not an image.'], 400); return; }
-            // Explicitly block SVG uploads (stored XSS risk)
             if ($typeLower === 'image/svg+xml' || str_ends_with(strtolower((string)($f['name'] ?? '')), '.svg')) {
                 \json_response(['error' => 'SVG images are not allowed.'], 400); return;
             }
-            // Basic magic-number signature checks: permit JPEG, PNG, WEBP
             $buf = @file_get_contents($f['tmp_name'], false, null, 0, 12);
-            $isJpeg = $buf && strlen($buf) >= 3 && ord($buf[0]) === 0xFF && ord($buf[1]) === 0xD8 && ord($buf[2]) === 0xFF;
-            $isPng = $buf && strlen($buf) >= 8 && ord($buf[0]) === 0x89 && ord($buf[1]) === 0x50 && ord($buf[2]) === 0x4E && ord($buf[3]) === 0x47 && ord($buf[4]) === 0x0D && ord($buf[5]) === 0x0A && ord($buf[6]) === 0x1A && ord($buf[7]) === 0x0A;
-            $isWebp = $buf && strlen($buf) >= 12 && substr($buf, 0, 4) === 'RIFF' && substr($buf, 8, 4) === 'WEBP';
             $looksText = $buf && (substr($buf, 0, 1) === '<' || stripos($buf, '<svg') !== false);
             if ($looksText) { \json_response(['error' => 'Invalid image format.'], 400); return; }
-            if (!$isJpeg && !$isPng && !$isWebp) {
-                \json_response(['error' => 'Unsupported image format. Use JPG, PNG, or WEBP.'], 400); return;
-            }
+            // Accept broader image/* types; conversion attempted below.
         }
 
         $uploads = __DIR__ . '/../../../data/uploads';
@@ -1067,6 +1210,9 @@ BearerToken();
                     $mime = mime_content_type($f['tmp_name']) ?: '';
                     if (str_contains($mime, 'png')) $ext = '.png';
                     elseif (str_contains($mime, 'webp')) $ext = '.webp';
+                    elseif (str_contains($mime, 'gif')) $ext = '.gif';
+                    elseif (str_contains($mime, 'tiff') || str_contains($mime, 'tif')) $ext = '.tif';
+                    elseif (str_contains($mime, 'avif')) $ext = '.avif';
                     else $ext = '.jpg';
                 }
                 $destOrig = $uploads . '/' . $base . $ext;
@@ -1099,4 +1245,5 @@ BearerToken();
         DB::exec("DELETE FROM listing_draft_images WHERE id = ? AND draft_id = ?", [$imgId, $draftId]);
         \json_response(['ok' => true]);
     }
+}
 }
