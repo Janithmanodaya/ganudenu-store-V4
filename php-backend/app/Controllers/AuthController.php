@@ -119,9 +119,8 @@ class AuthController
         if ($domainUrl) {
             try { $cookieDomain = parse_url($domainUrl, PHP_URL_HOST) ?: ''; } catch (\Throwable $e) {}
         }
-        // Compute a valid cookie domain attribute:
-        // - Omit domain for localhost or IPs (host-only cookie is required)
-        // - Only set domain when it contains a dot and is not an IP
+        // Parity with Node: always SameSite=None; Secure only in production.
+        // Compute cookie domain: omit for localhost/IP, set for dotted hosts.
         $domainAttr = '';
         if ($cookieDomain) {
             $isIp = filter_var($cookieDomain, FILTER_VALIDATE_IP) !== false;
@@ -130,16 +129,13 @@ class AuthController
                 $domainAttr = $cookieDomain;
             }
         }
-        // On localhost/http (non-production), browsers reject SameSite=None without Secure.
-        // Use Lax in dev to ensure cookie is accepted over http.
-        $sameSite = $isProd ? 'None' : 'Lax';
         return [
             'expires' => time() + 7 * 24 * 60 * 60,
             'path' => '/',
             'domain' => $domainAttr,
             'secure' => $isProd ? true : false,
             'httponly' => true,
-            'samesite' => $sameSite
+            'samesite' => 'None'
         ];
     }
 
@@ -903,51 +899,23 @@ class AuthController
         $email = strtolower(trim((string)($b['email'] ?? '')));
         $password = (string)($b['password'] ?? '');
         $otp = (string)($b['otp'] ?? '');
-        if (!$email) { \json_response(['error' => 'Email is required.'], 400); return; }
-        if ($password === '' && $otp === '') { \json_response(['error' => 'Provide password or OTP.'], 400); return; }
+        if (!$email || !$password || !$otp) { \json_response(['error' => 'Email, password, and OTP are required.'], 400); return; }
 
         $user = DB::one("SELECT id, email, password_hash, is_admin, username, profile_photo_path, user_uid, is_verified FROM users WHERE email = ?", [$email]);
-        if (!$user) { \json_response(['error' => 'Invalid credentials.'], 401); return; }
-        // Ensure ADMIN_EMAIL is promoted to admin if configured
-        $adminEmail = strtolower(trim((string)(self::getEnv('ADMIN_EMAIL') ?: '')));
-        if ($adminEmail && $email === $adminEmail && !(int)$user['is_admin']) {
-            DB::exec("UPDATE users SET is_admin = 1 WHERE id = ?", [(int)$user['id']]);
-            $user['is_admin'] = 1;
-        }
-        if (!(int)$user['is_admin']) { \json_response(['error' => 'Invalid credentials.'], 401); return; }
+        if (!$user || !(int)$user['is_admin']) { \json_response(['error' => 'Invalid credentials.'], 401); return; }
 
-        $authed = false;
-        $mfa = false;
+        if (!password_verify($password, $user['password_hash'])) { \json_response(['error' => 'Invalid credentials.'], 401); return; }
 
-        // Try password if provided
-        if ($password !== '') {
-            if (password_verify($password, $user['password_hash'])) {
-                $authed = true;
-            } else if ($otp === '') {
-                \json_response(['error' => 'Invalid credentials.'], 401);
-                return;
-            }
-        }
-
-        // If not authed by password, try OTP if provided
-        if (!$authed && $otp !== '') {
-            $otpRecord = DB::one("SELECT * FROM otps WHERE email = ? AND otp = ? ORDER BY expires_at DESC", [$email, $otp]);
-            if (!$otpRecord) { \json_response(['error' => 'Invalid OTP.'], 401); return; }
-            if (time() > strtotime($otpRecord['expires_at'])) {
-                DB::exec("DELETE FROM otps WHERE id = ?", [(int)$otpRecord['id']]);
-                \json_response(['error' => 'OTP has expired.'], 401);
-                return;
-            }
+        $otpRecord = DB::one("SELECT * FROM otps WHERE email = ? AND otp = ? ORDER BY expires_at DESC", [$email, $otp]);
+        if (!$otpRecord) { \json_response(['error' => 'Invalid OTP.'], 401); return; }
+        if (time() > strtotime($otpRecord['expires_at'])) {
             DB::exec("DELETE FROM otps WHERE id = ?", [(int)$otpRecord['id']]);
-            $authed = true;
-            $mfa = true;
+            \json_response(['error' => 'OTP has expired.'], 401);
+            return;
         }
+        DB::exec("DELETE FROM otps WHERE id = ?", [(int)$otpRecord['id']]);
 
-        if (!$authed) { \json_response(['error' => 'Invalid credentials.'], 401); return; }
-
-        $claims = ['user_id' => (int)$user['id'], 'email' => $user['email'], 'is_admin' => true];
-        if ($mfa) $claims['mfa'] = true;
-
+        $claims = ['user_id' => (int)$user['id'], 'email' => $user['email'], 'is_admin' => true, 'mfa' => true];
         $token = JWT::sign($claims);
         setcookie('auth_token', $token, self::getAuthCookieOptions());
         $photo_url = !empty($user['profile_photo_path']) ? ('/uploads/' . basename($user['profile_photo_path'])) : null;
@@ -963,8 +931,7 @@ class AuthController
         $email = strtolower(trim((string)($b['email'] ?? '')));
         $password = (string)($b['password'] ?? '');
         $otp = (string)($b['otp'] ?? '');
-        if (!$email) { \json_response(['error' => 'Email is required.'], 400); return; }
-        if ($password === '' && $otp === '') { \json_response(['error' => 'Provide password or OTP.'], 400); return; }
+        if (!$email || !$password || !$otp) { \json_response(['error' => 'Email, password, and OTP are required.'], 400); return; }
         $user = DB::one("SELECT id, email, password_hash, is_admin, username, profile_photo_path, is_banned, suspended_until, user_uid, is_verified FROM users WHERE email = ?", [$email]);
         if (!$user) { \json_response(['error' => 'Invalid credentials.'], 401); return; }
 
@@ -976,28 +943,19 @@ class AuthController
             }
         }
 
-        $authed = false;
-        if ($password !== '') {
-            if (password_verify($password, $user['password_hash'])) {
-                $authed = true;
-            } else if ($otp === '') {
-                \json_response(['error' => 'Invalid credentials.'], 401);
-                return;
-            }
-        }
-        if (!$authed && $otp !== '') {
-            $otpRecord = DB::one("SELECT * FROM otps WHERE email = ? AND otp = ? ORDER BY expires_at DESC", [$email, $otp]);
-            if (!$otpRecord) { \json_response(['error' => 'Invalid OTP.'], 401); return; }
-            if (time() > strtotime($otpRecord['expires_at'])) {
-                DB::exec("DELETE FROM otps WHERE id = ?", [(int)$otpRecord['id']]);
-                \json_response(['error' => 'OTP has expired.'], 401);
-                return;
-            }
-            DB::exec("DELETE FROM otps WHERE id = ?", [(int)$otpRecord['id']]);
-            $authed = true;
+        if (!password_verify($password, $user['password_hash'])) {
+            \json_response(['error' => 'Invalid credentials.'], 401);
+            return;
         }
 
-        if (!$authed) { \json_response(['error' => 'Invalid credentials.'], 401); return; }
+        $otpRecord = DB::one("SELECT * FROM otps WHERE email = ? AND otp = ? ORDER BY expires_at DESC", [$email, $otp]);
+        if (!$otpRecord) { \json_response(['error' => 'Invalid OTP.'], 401); return; }
+        if (time() > strtotime($otpRecord['expires_at'])) {
+            DB::exec("DELETE FROM otps WHERE id = ?", [(int)$otpRecord['id']]);
+            \json_response(['error' => 'OTP has expired.'], 401);
+            return;
+        }
+        DB::exec("DELETE FROM otps WHERE id = ?", [(int)$otpRecord['id']]);
 
         $token = JWT::sign(['user_id' => (int)$user['id'], 'email' => $user['email'], 'is_admin' => !!$user['is_admin']]);
         setcookie('auth_token', $token, self::getAuthCookieOptions());
@@ -1079,7 +1037,7 @@ class AuthController
         if (!$tok && isset($_COOKIE['auth_token'])) {
             $tok = (string) $_COOKIE['auth_token'];
         }
-        if (!$tok) { \json_response(['error' => 'Missing authorization token.'], 401); return; }
+        if (!$tok) { \json_response(['error' => 'Missing authorization bearer token.'], 401); return; }
 
         $v = JWT::verify($tok);
         if (!$v['ok']) { \json_response(['error' => 'Invalid token.'], 401); return; }

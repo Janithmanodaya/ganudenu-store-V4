@@ -3,6 +3,9 @@ namespace App\Services;
 
 class SecureConfig
 {
+    private static array $cache = [];
+    private static ?int $cacheMtime = null;
+
     private static function basePath(): string
     {
         $base = realpath(__DIR__ . '/../../..') ?: (__DIR__ . '/../../..');
@@ -46,6 +49,50 @@ class SecureConfig
         } catch (\Throwable $e) {
             return ['ok' => false, 'status' => 400, 'error' => 'Invalid passphrase or corrupted config'];
         }
+    }
+
+    /**
+     * getSecret provides Node parity for reading secrets.
+     * If SECURE_CONFIG_PASSPHRASE is set and secure-config.enc exists, prefers that JSON.
+     * Otherwise falls back to environment variables using the same key mappings as Node.
+     */
+    public static function getSecret(string $key): ?string
+    {
+        $path = self::basePath();
+        $pass = getenv('SECURE_CONFIG_PASSPHRASE') ?: '';
+        if ($pass && is_file($path)) {
+            $stat = @stat($path);
+            $mtime = $stat && isset($stat['mtime']) ? (int)$stat['mtime'] : null;
+            if ($mtime !== null && self::$cache && self::$cacheMtime === $mtime) {
+                // cached
+            } else {
+                $res = self::decryptFromFile($pass);
+                if (!empty($res['ok']) && !empty($res['config']) && is_array($res['config'])) {
+                    self::$cache = $res['config'];
+                    self::$cacheMtime = $mtime;
+                } else {
+                    self::$cache = [];
+                    self::$cacheMtime = $mtime;
+                }
+            }
+            if (array_key_exists($key, self::$cache)) {
+                $v = self::$cache[$key];
+                return is_scalar($v) ? (string)$v : null;
+            }
+        }
+        // Env fallbacks mirroring Node mapping
+        $map = [
+            'gemini_api_key' => getenv('GEMINI_API_KEY') ?: null,
+            'smtp_host' => getenv('SMTP_HOST') ?: null,
+            'smtp_port' => getenv('SMTP_PORT') ?: null,
+            'smtp_secure' => getenv('SMTP_SECURE') ?: null,
+            'smtp_user' => getenv('SMTP_USER') ?: null,
+            'smtp_pass' => getenv('SMTP_PASS') ?: null,
+            'smtp_from' => (getenv('SMTP_FROM') ?: (getenv('BREVO_LOGIN') ?: null)),
+            'brevo_api_key' => getenv('BREVO_API_KEY') ?: null,
+            'brevo_login' => getenv('BREVO_LOGIN') ?: null,
+        ];
+        return $map[$key] ?? null;
     }
 
     public static function encrypt(string $passphrase, string $plaintext): string
