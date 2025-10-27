@@ -1184,7 +1184,7 @@ class AdminController
         $admin = self::requireAdmin(); if (!$admin) return;
         $q = strtolower(trim((string)($_GET['q'] ?? '')));
         $limit = max(1, min(500, (int)($_GET['limit'] ?? 100)));
-        $sql = "SELECT id, email, username, is_admin, is_banned, suspended_until, is_verified, created_at FROM users";
+        $sql = "SELECT id, email, username, user_uid, is_admin, is_banned, suspended_until, is_verified, created_at FROM users";
         $params = [];
         if ($q) { $sql .= " WHERE LOWER(email) LIKE ? OR LOWER(username) LIKE ?"; $term = '%' . $q . '%'; $params = [$term, $term]; }
         $sql .= " ORDER BY id DESC LIMIT ?";
@@ -1197,7 +1197,14 @@ class AdminController
     {
         $admin = self::requireAdmin(); if (!$admin) return;
         $id = (int)($params['id'] ?? 0);
+        $u = DB::one("SELECT email FROM users WHERE id = ?", [$id]);
         DB::exec("UPDATE users SET is_verified = 1 WHERE id = ?", [$id]);
+        if ($u && !empty($u['email'])) {
+            DB::exec("
+              INSERT INTO notifications (title, message, target_email, created_at, type)
+              VALUES (?, ?, ?, ?, 'verify')
+            ", ['Account verified', 'Your account has been verified by an administrator.', strtolower(trim((string)$u['email'])), gmdate('c')]);
+        }
         \json_response(['ok' => true]);
     }
 
@@ -1213,7 +1220,14 @@ class AdminController
     {
         $admin = self::requireAdmin(); if (!$admin) return;
         $id = (int)($params['id'] ?? 0);
-        DB::exec("UPDATE users SET is_banned = 1 WHERE id = ?", [$id]);
+        $u = DB::one("SELECT email FROM users WHERE id = ?", [$id]);
+        DB::exec("UPDATE users SET is_banned = 1, suspended_until = NULL WHERE id = ?", [$id]);
+        if ($u && !empty($u['email'])) {
+            DB::exec("
+              INSERT INTO notifications (title, message, target_email, created_at, type)
+              VALUES (?, ?, ?, ?, 'ban')
+            ", ['Account banned', 'Your account has been banned by an administrator.', strtolower(trim((string)$u['email'])), gmdate('c')]);
+        }
         \json_response(['ok' => true]);
     }
 
@@ -1221,7 +1235,14 @@ class AdminController
     {
         $admin = self::requireAdmin(); if (!$admin) return;
         $id = (int)($params['id'] ?? 0);
-        DB::exec("UPDATE users SET is_banned = 0 WHERE id = ?", [$id]);
+        $u = DB::one("SELECT email FROM users WHERE id = ?", [$id]);
+        DB::exec("UPDATE users SET is_banned = 0, suspended_until = NULL WHERE id = ?", [$id]);
+        if ($u && !empty($u['email'])) {
+            DB::exec("
+              INSERT INTO notifications (title, message, target_email, created_at, type)
+              VALUES (?, ?, ?, ?, 'unban')
+            ", ['Account unbanned', 'Your account ban has been lifted by an administrator.', strtolower(trim((string)$u['email'])), gmdate('c')]);
+        }
         \json_response(['ok' => true]);
     }
 
@@ -1229,8 +1250,15 @@ class AdminController
     {
         $admin = self::requireAdmin(); if (!$admin) return;
         $id = (int)($params['id'] ?? 0);
+        $u = DB::one("SELECT email FROM users WHERE id = ?", [$id]);
         $until = gmdate('c', time() + 7 * 24 * 3600);
-        DB::exec("UPDATE users SET suspended_until = ? WHERE id = ?", [$until, $id]);
+        DB::exec("UPDATE users SET is_banned = 0, suspended_until = ? WHERE id = ?", [$until, $id]);
+        if ($u && !empty($u['email'])) {
+            DB::exec("
+              INSERT INTO notifications (title, message, target_email, created_at, type)
+              VALUES (?, ?, ?, ?, 'suspend')
+            ", ['Account suspended', 'Your account has been suspended until ' . $until . '.', strtolower(trim((string)$u['email'])), gmdate('c')]);
+        }
         \json_response(['ok' => true]);
     }
 
@@ -1241,7 +1269,14 @@ class AdminController
         $b = \read_body_json();
         $days = max(1, (int)($b['days'] ?? 7));
         $until = gmdate('c', time() + $days * 24 * 3600);
-        DB::exec("UPDATE users SET suspended_until = ? WHERE id = ?", [$until, $id]);
+        $u = DB::one("SELECT email FROM users WHERE id = ?", [$id]);
+        DB::exec("UPDATE users SET is_banned = 0, suspended_until = ? WHERE id = ?", [$until, $id]);
+        if ($u && !empty($u['email'])) {
+            DB::exec("
+              INSERT INTO notifications (title, message, target_email, created_at, type)
+              VALUES (?, ?, ?, ?, 'suspend')
+            ", ['Account suspended', 'Your account has been suspended for ' . $days . ' days until ' . $until . '.', strtolower(trim((string)$u['email'])), gmdate('c')]);
+        }
         \json_response(['ok' => true]);
     }
 
@@ -1249,7 +1284,14 @@ class AdminController
     {
         $admin = self::requireAdmin(); if (!$admin) return;
         $id = (int)($params['id'] ?? 0);
+        $u = DB::one("SELECT email FROM users WHERE id = ?", [$id]);
         DB::exec("UPDATE users SET suspended_until = NULL WHERE id = ?", [$id]);
+        if ($u && !empty($u['email'])) {
+            DB::exec("
+              INSERT INTO notifications (title, message, target_email, created_at, type)
+              VALUES (?, ?, ?, ?, 'unsuspend')
+            ", ['Account unsuspended', 'Your account suspension has been lifted by an administrator.', strtolower(trim((string)$u['email'])), gmdate('c')]);
+        }
         \json_response(['ok' => true]);
     }
 
