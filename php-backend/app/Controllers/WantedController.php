@@ -77,13 +77,57 @@ class WantedController
         ]);
         $id = DB::lastInsertId();
 
+        // Immediately notify sellers with matching existing approved listings (in-app notifications)
+        $sellerNotified = 0;
+        try {
+            $listings = DB::all("
+              SELECT id, title, main_category, location, price, structured_json, owner_email
+              FROM listings
+              WHERE status = 'Approved'
+              ORDER BY created_at DESC
+              LIMIT 1000
+            ");
+            $insSeller = DB::conn()->prepare("
+              INSERT INTO notifications (title, message, target_email, created_at, type, listing_id, meta_json)
+              VALUES (?, ?, ?, ?, 'wanted_match_seller', ?, ?)
+            ");
+            foreach ($listings as $l) {
+                if (self::listingMatchesWanted($l, [
+                    'category' => $category,
+                    'locations_json' => json_encode($locations),
+                    'models_json' => json_encode($models),
+                    'year_min' => $year_min,
+                    'year_max' => $year_max,
+                    'price_min' => $price_min,
+                    'price_max' => $price_max,
+                    'price_not_matter' => $price_not_matter,
+                    'filters_json' => $filters_json
+                ])) {
+                    $owner = strtolower(trim((string)$l['owner_email']));
+                    if ($owner) {
+                        $insSeller->execute([
+                            'Immediate buyer request for your item',
+                            'A buyer posted a request: "' . $title . '". Your ad "' . ($l['title'] ?? '') . '" may match.',
+                            $owner,
+                            gmdate('c'),
+                            (int)$l['id'],
+                            json_encode(['wanted_id' => $id])
+                        ]);
+                        $sellerNotified++;
+                    }
+                }
+            }
+        } catch (\Throwable $e) {}
+
         // Notify buyer that request was posted
         DB::exec("
           INSERT INTO notifications (title, message, target_email, created_at, type, meta_json)
           VALUES (?, ?, ?, ?, 'wanted_posted', ?)
         ", ['Your Wanted request was posted',
-             ($price_not_matter ? 'We will notify you when new matching ads are listed.' : 'We will notify you when new matching ads are listed.'),
-             $u['email'], gmdate('c'), json_encode(['wanted_id' => $id])]);
+             ($sellerNotified > 0
+                 ? ('We found ' . $sellerNotified . ' potential matches. Sellers have been notified.')
+                 : 'We will notify you when new matching ads are listed.'),
+             $u['email'], gmdate('c'), json_encode(['wanted_id' => $id, 'matches_count' => $sellerNotified])]);
 
         \json_response(['ok' => true, 'id' => $id]);
     }
