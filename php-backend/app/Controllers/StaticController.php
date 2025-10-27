@@ -97,13 +97,21 @@ class StaticController
 
     public static function maintenanceStream(): void
     {
-        // Allow long-lived SSE without timing out (especially under PHP built-in server)
-        @set_time_limit(0);
-        SSE::start();
         $current = function () {
             $row = DB::one("SELECT maintenance_mode, maintenance_message FROM admin_config WHERE id = 1");
             return ['enabled' => !!($row && $row['maintenance_mode']), 'message' => $row['maintenance_message'] ?? ''];
         };
+        // The PHP built-in server (cli-server) is single-threaded; a long-lived SSE will block all other requests.
+        // For local testing, short-circuit: send one event and exit so the UI doesn't freeze.
+        if (PHP_SAPI === 'cli-server') {
+            SSE::start();
+            SSE::event('maintenance_status', $current());
+            exit;
+        }
+
+        // On real hosting (Apache/Nginx + PHP-FPM), keep a long-lived stream.
+        @set_time_limit(0);
+        SSE::start();
         SSE::event('maintenance_status', $current());
         $hb = 15;
         $interval = 30;
