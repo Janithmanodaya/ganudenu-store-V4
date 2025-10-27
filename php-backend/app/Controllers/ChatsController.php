@@ -3,6 +3,7 @@ namespace App\Controllers;
 
 use App\Services\DB;
 use App\Services\JWT;
+use App\Services\SSE;
 
 class ChatsController
 {
@@ -170,5 +171,130 @@ class ChatsController
         $ts = gmdate('c');
         DB::exec("INSERT INTO chats (user_email, sender, message, created_at) VALUES (?, 'admin', ?, ?)", [$email, mb_substr($message, 0, 2000), $ts]);
         \json_response(['ok' => true, 'created_at' => $ts]);
+    }
+
+    public static function userStream(): void
+    {
+        self::ensureSchema();
+        $u = self::requireUser(); if (!$u) return;
+
+        @set_time_limit(0);
+        SSE::start();
+
+        $email = $u['email'];
+        $cutoffIso = gmdate('c', time() - 7 * 24 * 3600);
+        $lastIdParam = isset($_GET['last_id']) ? (int)$_GET['last_id'] : 0;
+
+        $getNew = function (int $sinceId) use ($email, $cutoffIso) {
+            return DB::all("
+                SELECT id, sender, message, created_at
+                FROM chats
+                WHERE user_email = ? AND id > ? AND created_at >= ?
+                ORDER BY id ASC
+                LIMIT 200
+            ", [$email, $sinceId, $cutoffIso]);
+        };
+
+        // Initialize lastId to current max to avoid resending history unless client requests via last_id
+        $rowMax = DB::one("SELECT MAX(id) AS max_id FROM chats WHERE user_email = ?", [$email]);
+        $lastId = (int)($rowMax['max_id'] ?? 0);
+
+        if ($lastIdParam > 0) {
+            $rows = $getNew($lastIdParam);
+            if (count($rows)) {
+                SSE::event('chat_messages', ['results' => $rows]);
+                $lastId = (int)$rows[count($rows) - 1]['id'];
+            } else {
+                $lastId = max($lastId, $lastIdParam);
+            }
+        }
+
+        $intervalMs = 30000;
+        $lastEvent = microtime(true);
+        $lastHb = microtime(true);
+        $endAt = microtime(true) + 25.0;
+
+        while (!connection_aborted() && microtime(true) < $endAt) {
+            $now = microtime(true);
+            if (($now - $lastEvent) * 1000 >= $intervalMs) {
+                $rows = $getNew($lastId);
+                if (count($rows)) {
+                    SSE::event('chat_messages', ['results' => $rows]);
+                    $lastId = (int)$rows[count($rows) - 1]['id'];
+                }
+                $lastEvent = $now;
+            }
+            if (($now - $lastHb) >= 15) {
+                SSE::heartbeat();
+                $lastHb = $now;
+            }
+            usleep(250000);
+        }
+        echo ": closing\n\n";
+        flush();
+        exit;
+    }
+
+    public static function adminStream(array $params): void
+    {
+        self::ensureSchema();
+        $admin = self::requireAdmin(); if (!$admin) return;
+
+        $email = strtolower(trim((string)($params['email'] ?? '')));
+        if (!$email) { \text_response(json_encode(['error' => 'Invalid email.']), 400, 'application/json'); return; }
+
+        @set_time_limit(0);
+        SSE::start();
+
+        $cutoffIso = gmdate('c', time() - 7 * 24 * 3600);
+        $lastIdParam = isset($_GET['last_id']) ? (int)$_GET['last_id'] : 0;
+
+        $getNew = function (int $sinceId) use ($email, $cutoffIso) {
+            return DB::all("
+                SELECT id, sender, message, created_at
+                FROM chats
+                WHERE user_email = ? AND id > ? AND created_at >= ?
+                ORDER BY id ASC
+                LIMIT 300
+            ", [$email, $sinceId, $cutoffIso]);
+        };
+
+        $rowMax = DB::one("SELECT MAX(id) AS max_id FROM chats WHERE user_email = ?", [$email]);
+        $lastId = (int)($rowMax['max_id'] ?? 0);
+
+        if ($lastIdParam > 0) {
+            $rows = $getNew($lastIdParam);
+            if (count($rows)) {
+                SSE::event('chat_messages', ['results' => $rows]);
+                $lastId = (int)$rows[count($rows) - 1]['id'];
+            } else {
+                $lastId = max($lastId, $lastIdParam);
+            }
+        }
+
+        $intervalMs = 30000;
+        $lastEvent = microtime(true);
+        $lastHb = microtime(true);
+        $endAt = microtime(true) + 25.0;
+
+        while (!connection_aborted() && microtime(true) < $endAt) {
+            $now = microtime(true);
+            if (($now - $lastEvent) * 1000 >= $intervalMs) {
+                $rows = $getNew($lastId);
+                if (count($rows)) {
+                    SSE::event('chat_messages', ['results' => $rows]);
+                    $lastId = (int)$rows[count($rows) - 1]['id'];
+                }
+                $lastEvent = $now;
+            }
+            if (($now - $lastHb) >= 15) {
+                SSE::heartbeat();
+                $lastHb = $now;
+            }
+            usleep(250000);
+        }
+        echo ": closing\n\n";
+        flush();
+        exit;
     }
 }
