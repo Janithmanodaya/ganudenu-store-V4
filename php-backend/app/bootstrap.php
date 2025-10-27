@@ -155,7 +155,7 @@ function set_auth_cookie(string $token): void {
         'domain' => $domainAttr,
         'secure' => $isProd ? true : false,
         'httponly' => true,
-        'samesite' => $isProd ? 'None' : 'Lax'
+        'samesite' => 'None'
     ];
     // PHP setcookie signature handling
     setcookie('auth_token', $token, $params);

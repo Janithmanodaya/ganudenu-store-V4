@@ -43,13 +43,35 @@ class Router
             $params = $this->matchPath($r['pattern'], $path);
             if ($params === null) continue;
 
-            // Rate limit per route group
+            // Rate limit per route group with defaults when env missing
             $group = $r['opts']['rate_group'] ?? null;
             if ($group) {
-                $max = (int) getenv("RATE_{$group}_MAX");
-                $win = (int) getenv("RATE_{$group}_WINDOW_MS");
+                $gUpper = strtoupper($group);
+                $defaults = [
+                    'GLOBAL' => ['max' => 120, 'win' => 60000],
+                    'AUTH' => ['max' => 60, 'win' => 60000],
+                    'ADMIN' => ['max' => 90, 'win' => 60000],
+                    'LISTINGS' => ['max' => 60, 'win' => 60000],
+                ];
+                $maxEnv = getenv("RATE_{$gUpper}_MAX");
+                $winEnv = getenv("RATE_{$gUpper}_WINDOW_MS");
+                $max = (int) ($maxEnv !== false ? $maxEnv : 0);
+                $win = (int) ($winEnv !== false ? $winEnv : 0);
+                if ((!$max || !$win) && isset($defaults[$gUpper])) {
+                    $def = $defaults[$gUpper];
+                    if (!$max) {
+                        $max = (int) $def['max'];
+                        @putenv("RATE_{$gUpper}_MAX={$max}");
+                        $_ENV["RATE_{$gUpper}_MAX"] = (string)$max;
+                    }
+                    if (!$win) {
+                        $win = (int) $def['win'];
+                        @putenv("RATE_{$gUpper}_WINDOW_MS={$win}");
+                        $_ENV["RATE_{$gUpper}_WINDOW_MS"] = (string)$win;
+                    }
+                }
                 if ($max && $win) {
-                    if (!RateLimiter::check(strtolower($group), $max, $win)) {
+                    if (!RateLimiter::check(strtolower($gUpper), $max, $win)) {
                         http_response_code(429);
                         header('Content-Type: application/json');
                         echo json_encode(['error' => 'Too Many Requests']);
