@@ -923,15 +923,16 @@ export default function AdminPage() {
      < div className="center">
        < div className="card">
          < div className="h1">Admin Dashboa</d<div>
-         < p className="text-muted">Checkingdenied. Admins only.</p>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button className="btn primary" onClick={() => navigate('/auth')}>Go to Login</button>
-            <button className="btn" onClick={() => navigate('/')}>Home</button>
-          </div>
-        </div>
-      </div>
-    )
-  }
+         < p className="text-muted">Checking access… Admins on.<//pp>
+         <ddiv style={{ display: 'flex', gap: 8 }}>
+           <bbutton className="btn primary" onClick={() => navigate('/auth')}>Go to Log<//bbutton>
+           <bbutton className="btn" onClick={() => navigate('/')}>Ho<//bbutton>
+        <//ddiv>
+      <//ddiv>
+    <//ddiv>
+    )_code
+ new </}
+}
 
   return (
     <div className="center">
@@ -1497,8 +1498,23 @@ export default function AdminPage() {
               {pending.length === 0 && <p className="text-muted">No pending items.</p>}
               {pending.map(p => (
                 <div key={p.id} className="card" style={{ marginBottom: 8 }}>
-                  <div><strong>#{p.id}</strong> {p.title}</div>
-                  <div className="text-muted">{p.main_category} • {new Date(p.created_at).toLocaleString()}</div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      <strong>#{p.id}</strong> {p.title}
+                    </div>
+                    <div className="text-muted" style={{ whiteSpace: 'nowrap' }}>
+                      {new Date(p.created_at).toLocaleString()}
+                    </div>
+                  </div>
+                  <div className="text-muted" style={{ marginTop: 4 }}>
+                    {p.main_category} • <span title="Owner email">{p.owner_email || 'Unknown'}</span>
+                    {p.remark_number ? <> • Remark: <strong>{p.remark_number}</strong></> : null}
+                  </div>
+                  {p.description && (
+                    <div className="text-muted" style={{ marginTop: 6, maxHeight: 80, overflow: 'hidden' }}>
+                      {p.description}
+                    </div>
+                  )}
                   <button className="btn" style={{ marginTop: 6 }} onClick={() => loadDetail(p.id)}>Open</button>
                 </div>
               ))}
