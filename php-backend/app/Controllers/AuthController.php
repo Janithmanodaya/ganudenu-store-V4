@@ -1060,7 +1060,8 @@ class AuthController
 
         // Auto-promote if email matches ADMIN_EMAIL (parity with AdminController)
         $claimsEmail = strtolower((string)($claims['email'] ?? ''));
-        $adminEmail = strtolower(trim((string)(getenv('ADMIN_EMAIL') ?: '')));
+        // Use same fallback as bootstrap seeding so local dev works even if ADMIN_EMAIL is not set
+        $adminEmail = strtolower(trim((string)(self::getEnv('ADMIN_EMAIL') ?: 'janithmanodaya2002@gmail.com')));
         if ($user && !(int)$user['is_admin']) {
             if ($adminEmail && $claimsEmail && $claimsEmail === $adminEmail) {
                 DB::exec("UPDATE users SET is_admin = 1 WHERE id = ?", [(int)$user['id']]);
