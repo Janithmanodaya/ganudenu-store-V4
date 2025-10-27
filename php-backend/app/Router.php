@@ -38,9 +38,17 @@ class Router
         $uri = $_SERVER['REQUEST_URI'] ?? '/';
         $path = parse_url($uri, PHP_URL_PATH) ?: '/';
 
+        // Normalize path: treat trailing slashes as optional (except for root)
+        $pathNorm = ($path !== '/') ? rtrim($path, '/') : '/';
+
         foreach ($this->routes as $r) {
             if ($r['method'] !== $method) continue;
-            $params = $this->matchPath($r['pattern'], $path);
+
+            // Normalize pattern similarly
+            $pattern = $r['pattern'];
+            $patternNorm = ($pattern !== '/') ? rtrim($pattern, '/') : '/';
+
+            $params = $this->matchPath($patternNorm, $pathNorm);
             if ($params === null) continue;
 
             // Rate limit per route group with defaults when env missing
