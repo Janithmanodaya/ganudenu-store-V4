@@ -175,23 +175,28 @@ function copyPhpBackend() {
 }
 
 function writeApiEnv() {
-  // Quote values to be safe on Windows (paths may have spaces). Use forward slashes.
-  const DB_PATH = path.join(API_VAR, 'ganudenu.sqlite').replace(/\\\\/g, '/');
-  const UPLOADS = API_UPLOADS.replace(/\\\\/g, '/');
+  // To avoid phpdotenv escape parsing on Windows backslashes, always write forward slashes
+  // and use single quotes (phpdotenv treats single-quoted values literally).
+  const toPosix = (p) => p.replace(/\\\\/g, '/');
+  const DB_PATH = toPosix(path.join(API_VAR, 'ganudenu.sqlite'));
+  const UPLOADS = toPosix(API_UPLOADS);
   const ORIGIN = 'https://ganudenu.store';
   const lines = [
-    `APP_ENV="production"`,
-    `PUBLIC_DOMAIN="${ORIGIN}"`,
-    `PUBLIC_ORIGIN="${ORIGIN}"`,
-    `TRUST_PROXY_HOPS="1"`,
-    `DB_PATH="${DB_PATH}"`,
-    `UPLOADS_PATH="${UPLOADS}"`,
-    `CORS_ORIGINS="${ORIGIN}"`,
+    `APP_ENV='production'`,
+    `PUBLIC_DOMAIN='${ORIGIN}'`,
+    `PUBLIC_ORIGIN='${ORIGIN}'`,
+    `TRUST_PROXY_HOPS='1'`,
+    `DB_PATH='${DB_PATH}'`,
+    `UPLOADS_PATH='${UPLOADS}'`,
+    `CORS_ORIGINS='${ORIGIN}'`,
     // Admin email default is already handled in code; set if you want:
-    // `ADMIN_EMAIL="janithmanodaya2002@gmail.com"`,
-    // `ADMIN_PASSWORD="change_me"`,
+    // `ADMIN_EMAIL='janithmanodaya2002@gmail.com'`,
+    // `ADMIN_PASSWORD='change_me'`,
   ];
-  fs.writeFileSync(path.join(API_OUT, '.env'), lines.join('\n') + '\n', 'utf8');
+  const envPath = path.join(API_OUT, '.env');
+  try { fs.unlinkSync(envPath); } catch {}
+  fs.writeFileSync(envPath, lines.join('\n') + '\n', 'utf8');
+  log(`Wrote ${envPath} with DB_PATH=${DB_PATH} and UPLOADS_PATH=${UPLOADS}`);
 }
 
 function fixApiIndexRequire() {
