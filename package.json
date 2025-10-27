@@ -1,0 +1,43 @@
+{
+  "name": "ganudenu-marketplace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Ganudenu Marketplace - React + Vite",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "start": "node server/index.js",
+    "test": "vitest run",
+    "health": "vitest run server/tests/health.spec.js",
+    "health:full": "vitest run server/tests/health.spec.js server/tests/auth.spec.js server/tests/health_auth.spec.js"
+  },
+  "dependencies": {
+    "@sendinblue/client": "^3.3.1",
+    "better-sqlite3": "^12.4.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^7.9.4",
+    "express": "^4.19.2",
+    "cors": "^2.8.5",
+    "morgan": "^1.10.0",
+    "express-rate-limit": "^7.4.0",
+    "bcrypt": "^5.1.1",
+    "dotenv": "^16.4.5",
+    "helmet": "^7.0.0",
+    "compression": "^1.7.4",
+    "multer": "^1.4.5-lts.1",
+    "node-fetch": "^3.3.2",
+    "nodemailer": "^6.9.9",
+    "archiver": "^7.0.1",
+    "adm-zip": "^0.5.16",
+    "jsonwebtoken": "^9.0.2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.2",
+    "vite": "^5.4.0",
+    "vitest": "^1.0.0",
+    "supertest": "^6.3.4"
+  }
+}

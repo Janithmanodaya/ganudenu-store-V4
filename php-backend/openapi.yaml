@@ -1,0 +1,1755 @@
+openapi: 3.0.3
+info:
+  title: Ganudenu PHP Backend API
+  version: "1.0.0"
+  description: |
+    PHP implementation with exact parity to Node/Express Ganudenu backend.
+    - Routes under /api/*
+    - Public endpoints: /robots.txt, /sitemap.xml, /uploads/*
+    - Auth via JWT HS256 with cookie auth_token and Authorization: Bearer support
+    - SSE streams: maintenance_status, unread_count
+
+servers:
+  - url: http://localhost:8080
+
+tags:
+  - name: Public
+  - name: Auth
+  - name: Listings
+  - name: Admin
+  - name: Notifications
+  - name: Users
+  - name: Wanted
+  - name: Chats
+  - name: SSE
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+    Health:
+      type: object
+      properties:
+        ok: { type: boolean }
+        service: { type: string }
+        ts: { type: string, format: date-time }
+    Banner:
+      type: object
+      properties:
+        id: { type: integer }
+        url: { type: string }
+    AuthStatus:
+      type: object
+      properties:
+        ok: { type: boolean }
+        email: { type: string }
+        username: { type: string, nullable: true }
+        is_admin: { type: boolean }
+        is_banned: { type: boolean }
+        suspended_until: { type: string, format: date-time, nullable: true }
+    Notification:
+      type: object
+      properties:
+        id: { type: integer }
+        title: { type: string }
+        message: { type: string }
+        target_email: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        type: { type: string, nullable: true }
+        listing_id: { type: integer, nullable: true }
+        meta_json: { type: string, nullable: true }
+        is_read: { type: integer }
+        read_at: { type: string, format: date-time, nullable: true }
+
+paths:
+  /auth/google/start:
+    get:
+      tags: [Public]
+      summary: Redirect helper to /api/auth/google/start (preserves query)
+      responses:
+        "302":
+          description: Redirect to /api/auth/google/start
+  /auth/google/callback:
+    get:
+      tags: [Public]
+      summary: Redirect helper to /api/auth/google/callback (preserves query)
+      responses:
+        "302":
+          description: Redirect to /api/auth/google/callback
+  /robots.txt:
+    get:
+      tags: [Public]
+      summary: Robots.txt
+      responses:
+        "200":
+          description: Plain text robots rules
+          content:
+            text/plain:
+              schema:
+                type: string
+  /sitemap.xml:
+    get:
+      tags: [Public]
+      summary: Sitemap generated from Approved listings
+      responses:
+        "200":
+          description: XML sitemap
+          content:
+            application/xml:
+              schema:
+                type: string
+
+  /api/health:
+    get:
+      tags: [Public]
+      summary: Health check
+      responses:
+        "200":
+          description: Health object
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+
+  /api/banners:
+    get:
+      tags: [Public]
+      summary: Public banners
+      responses:
+        "200":
+          description: List of banners
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Banner"
+
+  /api/maintenance-status:
+    get:
+      tags: [Public]
+      summary: Maintenance status
+      responses:
+        "200":
+          description: Status object
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled: { type: boolean }
+                  message: { type: string }
+  /api/maintenance-status/stream:
+    get:
+      tags: [SSE]
+      summary: SSE stream for maintenance_status
+      responses:
+        "200":
+          description: text/event-stream with maintenance_status events and heartbeats
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
+  /api/auth/google/start:
+    get:
+      tags: [Auth]
+      summary: Start Google OAuth (redirect to consent)
+      parameters:
+        - in: query
+          name: r
+          schema: { type: string }
+          description: Return URL
+      responses:
+        "302":
+          description: Redirect to Google consent
+  /api/auth/google/callback:
+    get:
+      tags: [Auth]
+      summary: Google OAuth callback
+      parameters:
+        - in: query
+          name: code
+          schema: { type: string }
+        - in: query
+          name: state
+          schema: { type: string }
+      responses:
+        "302":
+          description: Redirect back to app with token query
+  /api/auth/user-exists:
+    get:
+      tags: [Auth]
+      summary: Check if user exists
+      parameters:
+        - in: query
+          name: email
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Exists response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  exists: { type: boolean }
+        "400":
+          description: Missing email
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/auth/update-username:
+    post:
+      tags: [Auth]
+      summary: Update username (requires current password)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, username]
+              properties:
+                email: { type: string }
+                password: { type: string }
+                username: { type: string }
+      responses:
+        "200":
+          description: Updated username
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  username: { type: string }
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: Username already taken
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/auth/upload-profile-photo:
+    post:
+      tags: [Auth]
+      summary: Upload profile photo (multipart: photo + email/password)
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [photo, email, password]
+              properties:
+                photo:
+                  type: string
+                  format: binary
+                email:
+                  type: string
+                password:
+                  type: string
+      responses:
+        "200":
+          description: Photo URL
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  photo_url: { type: string }
+
+  /api/auth/delete-account:
+    post:
+      tags: [Auth]
+      summary: Delete account (email/password)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string }
+                password: { type: string }
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  message: { type: string }
+
+  /api/auth/send-registration-otp:
+    post:
+      tags: [Auth]
+      summary: Send registration OTP
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string }
+      responses:
+        "200":
+          description: OTP sent/dev logged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  message: { type: string }
+                  otp:
+                    type: string
+                    nullable: true
+
+  /api/auth/verify-otp-and-register:
+    post:
+      tags: [Auth]
+      summary: Verify OTP and register user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, otp, username]
+              properties:
+                email: { type: string }
+                password: { type: string }
+                otp: { type: string }
+                username: { type: string }
+      responses:
+        "200":
+          description: Registration OK + token + user
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  token: { type: string }
+                  user:
+                    type: object
+        "409":
+          description: Email or username already registered
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Login requires OTP (admin or user)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string }
+                password: { type: string }
+      responses:
+        "200":
+          description: OTP required response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  otp_required: { type: boolean }
+                  is_admin: { type: boolean }
+
+  /api/auth/verify-admin-login-otp:
+    post:
+      tags: [Auth]
+      summary: Verify admin OTP and issue token (mfa=true)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, otp]
+              properties:
+                email: { type: string }
+                password: { type: string }
+                otp: { type: string }
+      responses:
+        "200":
+          description: Token + user
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  token: { type: string }
+                  user: { type: object }
+
+  /api/auth/verify-login-otp:
+    post:
+      tags: [Auth]
+      summary: Verify user OTP and issue token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, otp]
+              properties:
+                email: { type: string }
+                password: { type: string }
+                otp: { type: string }
+      responses:
+        "200":
+          description: Token + user
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  token: { type: string }
+                  user: { type: object }
+
+  /api/auth/forgot-password:
+    post:
+      tags: [Auth]
+      summary: Create OTP for reset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string }
+      responses:
+        "200":
+          description: Generic success message
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  message: { type: string }
+
+  /api/auth/verify-password-otp:
+    post:
+      tags: [Auth]
+      summary: Validate OTP for password reset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, otp]
+              properties:
+                email: { type: string }
+                otp: { type: string }
+      responses:
+        "200":
+          description: Verified
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  message: { type: string }
+
+  /api/auth/reset-password:
+    post:
+      tags: [Auth]
+      summary: Reset password with verified OTP
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, otp, password]
+              properties:
+                email: { type: string }
+                otp: { type: string }
+                password: { type: string }
+      responses:
+        "200":
+          description: Password reset
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  message: { type: string }
+
+  /api/auth/status:
+    get:
+      tags: [Auth]
+      summary: Authenticated user status
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthStatus"
+        "401":
+          description: Missing/invalid token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/notifications/:
+    get:
+      tags: [Notifications]
+      summary: List notifications with read state and TTL rules
+      parameters:
+        - in: header
+          name: X-User-Email
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Notifications
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items: { $ref: "#/components/schemas/Notification" }
+                  unread_count:
+                    type: integer
+
+  /api/notifications/unread-count:
+    get:
+      tags: [Notifications]
+      summary: Unread count
+      parameters:
+        - in: header
+          name: X-User-Email
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Count
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  unread_count: { type: integer }
+
+  /api/notifications/{id}/read:
+    post:
+      tags: [Notifications]
+      summary: Mark notification read
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+        - in: header
+          name: X-User-Email
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+
+  /api/notifications/unread-count/stream:
+    get:
+      tags: [SSE]
+      summary: SSE unread_count
+      parameters:
+        - in: header
+          name: X-User-Email
+          schema: { type: string }
+        - in: query
+          name: user_email
+          schema: { type: string }
+      responses:
+        "200":
+          description: text/event-stream with unread_count events and heartbeats
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
+  /api/users/profile:
+    get:
+      tags: [Users]
+      summary: Get seller profile
+      parameters:
+        - in: query
+          name: username
+          schema: { type: string }
+        - in: query
+          name: email
+          schema: { type: string }
+      responses:
+        "200":
+          description: Seller profile payload
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  user: { type: object }
+                  profile: { type: object }
+                  stats: { type: object }
+                  ratings: { type: array, items: { type: object } }
+    post:
+      tags: [Users]
+      summary: Upsert seller profile
+      parameters:
+        - in: header
+          name: X-User-Email
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                bio: { type: string }
+                verified_email: { type: boolean }
+                verified_phone: { type: boolean }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+
+  /api/users/rate:
+    post:
+      tags: [Users]
+      summary: Rate seller
+      parameters:
+        - in: header
+          name: X-User-Email
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [seller_email, stars]
+              properties:
+                seller_email: { type: string }
+                listing_id: { type: integer, nullable: true }
+                stars: { type: integer, minimum: 1, maximum: 5 }
+                comment: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+
+  /api/chats/:
+    get:
+      tags: [Chats]
+      summary: List user chat messages (7 days)
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Messages
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items: { type: object }
+    post:
+      tags: [Chats]
+      summary: Send user message
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  created_at: { type: string, format: date-time }
+
+  /api/chats/admin/conversations:
+    get:
+      tags: [Chats]
+      summary: Admin list conversations
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Conversations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items: { type: object }
+
+  /api/chats/admin/{email}:
+    get:
+      tags: [Chats]
+      summary: Admin fetch conversation
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: email
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Messages
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items: { type: object }
+    post:
+      tags: [Chats]
+      summary: Admin send message
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: email
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  created_at: { type: string, format: date-time }
+
+  /api/wanted/:
+    post:
+      tags: [Wanted]
+      summary: Create wanted request
+      parameters:
+        - in: header
+          name: X-User-Email
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string }
+                description: { type: string }
+                category: { type: string }
+                locations: { type: array, items: { type: string } }
+                models: { type: array, items: { type: string } }
+                year_min: { type: integer }
+                year_max: { type: integer }
+                price_min: { type: number }
+                price_max: { type: number }
+                price_not_matter: { type: boolean }
+                filters: { type: object }
+      responses:
+        "200":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  id: { type: integer }
+    get:
+      tags: [Wanted]
+      summary: List open wanted requests
+      parameters:
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: category
+          schema: { type: string }
+        - in: query
+          name: location
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items: { type: object }
+  /api/wanted/my:
+    get:
+      tags: [Wanted]
+      summary: List my wanted requests
+      parameters:
+        - in: header
+          name: X-User-Email
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items: { type: object }
+  /api/wanted/{id}/close:
+    post:
+      tags: [Wanted]
+      summary: Close wanted request
+      parameters:
+        - in: header
+          name: X-User-Email
+          required: true
+          schema: { type: string }
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+  /api/wanted/respond:
+    post:
+      tags: [Wanted]
+      summary: Seller respond with listing
+      parameters:
+        - in: header
+          name: X-User-Email
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [wanted_id, listing_id]
+              properties:
+                wanted_id: { type: integer }
+                listing_id: { type: integer }
+                message: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+
+  /api/listings/draft:
+    post:
+      tags: [Listings]
+      summary: Create draft (multipart images + fields)
+      parameters:
+        - in: header
+          name: X-User-Email
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [title, description]
+              properties:
+                main_category: { type: string }
+                title: { type: string }
+                description: { type: string }
+                images:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+                owner_email: { type: string }
+                wanted_tags_json: { type: string }
+      responses:
+        "200":
+          description: Draft created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  draftId: { type: integer }
+
+  /api/listings/draft/{id}:
+    get:
+      tags: [Listings]
+      summary: Get draft by id
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Draft + images
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  draft: { type: object }
+                  images: { type: array, items: { type: object } }
+
+  /api/listings/submit:
+    post:
+      tags: [Listings]
+      summary: Submit draft to listing
+      parameters:
+        - in: header
+          name: X-User-Email
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [draftId, structured_json]
+              properties:
+                draftId: { type: integer }
+                structured_json: { type: string }
+                description: { type: string }
+      responses:
+        "200":
+          description: Listing created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  listingId: { type: integer }
+                  remark_number: { type: string }
+
+  /api/listings/describe:
+    post:
+      tags: [Listings]
+      summary: Generate enhanced description for draft
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [draftId]
+              properties:
+                draftId: { type: integer }
+                structured_json: { type: string }
+      responses:
+        "200":
+          description: Description text
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  description: { type: string }
+
+  /api/listings/vehicle-specs:
+    post:
+      tags: [Listings]
+      summary: Infer vehicle specs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model_name]
+              properties:
+                model_name: { type: string }
+                description: { type: string }
+                sub_category: { type: string }
+      responses:
+        "200":
+          description: Specs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  specs: { type: object }
+
+  /api/listings/:
+    get:
+      tags: [Listings]
+      summary: List listings with filters (Approved by default)
+      parameters:
+        - in: query
+          name: category
+          schema: { type: string }
+        - in: query
+          name: sortBy
+          schema: { type: string, enum: [created_at, price] }
+        - in: query
+          name: order
+          schema: { type: string, enum: [ASC, DESC] }
+        - in: query
+          name: status
+          schema: { type: string }
+      responses:
+        "200":
+          description: Results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results: { type: array, items: { type: object } }
+
+  /api/listings/search:
+    get:
+      tags: [Listings]
+      summary: Search listings
+      parameters:
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: keyword_mode
+          schema: { type: string, enum: [or, and] }
+        - in: query
+          name: category
+          schema: { type: string }
+        - in: query
+          name: location
+          schema: { type: string }
+        - in: query
+          name: price_min
+          schema: { type: number }
+        - in: query
+          name: price_max
+          schema: { type: number }
+        - in: query
+          name: filters
+          schema: { type: string }
+        - in: query
+          name: sort
+          schema: { type: string }
+        - in: query
+          name: page
+          schema: { type: integer }
+        - in: query
+          name: limit
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results: { type: array, items: { type: object } }
+                  page: { type: integer }
+                  limit: { type: integer }
+
+  /api/listings/filters:
+    get:
+      tags: [Listings]
+      summary: Dynamic filters for a category
+      parameters:
+        - in: query
+          name: category
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Keys and values
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keys: { type: array, items: { type: string } }
+                  valuesByKey: { type: object }
+
+  /api/listings/suggestions:
+    get:
+      tags: [Listings]
+      summary: Suggestions for global search
+      parameters:
+        - in: query
+          name: q
+          required: true
+          schema: { type: string }
+        - in: query
+          name: category
+          schema: { type: string }
+        - in: query
+          name: exclude_category
+          schema: { type: string }
+      responses:
+        "200":
+          description: Suggestions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results: { type: array, items: { type: object } }
+
+  /api/listings/my:
+    get:
+      tags: [Listings]
+      summary: Get current user's listings
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: My listings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results: { type: array, items: { type: object } }
+
+  /api/listings/my-drafts:
+    get:
+      tags: [Listings]
+      summary: Get current user's drafts
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: employee_profile
+          schema: { type: string }
+      responses:
+        "200":
+          description: Drafts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results: { type: array, items: { type: object } }
+
+  /api/listings/draft/{id}:
+    delete:
+      tags: [Listings]
+      summary: Delete draft (owner only)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+
+  /api/listings/{id}:
+    get:
+      tags: [Listings]
+      summary: Get single listing by ID
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Listing
+          content:
+            application/json:
+              schema:
+                type: object
+    delete:
+      tags: [Listings]
+      summary: Delete listing (owner only)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+
+  /api/listings/{id}/report:
+    post:
+      tags: [Listings]
+      summary: Report a listing
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string }
+                reporter_email: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+
+  /api/listings/payment-info/{id}:
+    get:
+      tags: [Listings]
+      summary: Payment info for listing
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Payment info
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  listing: { type: object }
+                  bank_details: { type: string }
+                  bank_account_number: { type: string }
+                  bank_account_name: { type: string }
+                  bank_name: { type: string }
+                  whatsapp_number: { type: string }
+                  payment_amount: { type: integer }
+                  payments_enabled: { type: boolean }
+
+  /api/listings/payment-note:
+    post:
+      tags: [Listings]
+      summary: Seller note to admin regarding payment
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [listing_id, note]
+              properties:
+                listing_id: { type: integer }
+                note: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+
+  /api/admin/config:
+    get:
+      tags: [Admin]
+      summary: Get admin config
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Config
+          content:
+            application/json:
+              schema:
+                type: object
+    post:
+      tags: [Admin]
+      summary: Update admin config
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: OK
+
+  /api/admin/test-gemini:
+    post:
+      tags: [Admin]
+      summary: Test Gemini API
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK or error
+
+  /api/admin/prompts:
+    get:
+      tags: [Admin]
+      summary: Get prompts
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { description: Map of prompts }
+    post:
+      tags: [Admin]
+      summary: Set prompts
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200": { description: OK }
+
+  /api/admin/pending:
+    get:
+      tags: [Admin]
+      summary: List pending listings
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { description: Items }
+
+  /api/admin/pending/{id}:
+    get:
+      tags: [Admin]
+      summary: Pending listing details
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200": { description: OK }
+  /api/admin/pending/{id}/update:
+    post:
+      tags: [Admin]
+      summary: Update structured_json and SEO
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200": { description: OK }
+
+  /api/admin/pending/{id}/approve:
+    post:
+      tags: [Admin]
+      summary: Approve listing
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200": { description: OK }
+
+  /api/admin/pending/{id}/reject:
+    post:
+      tags: [Admin]
+      summary: Reject listing
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string }
+      responses:
+        "200": { description: OK }
+
+  /api/admin/pending/approve_many:
+    post:
+      tags: [Admin]
+      summary: Bulk approve listings
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  items: { type: integer }
+      responses:
+        "200": { description: OK }
+
+  /api/admin/metrics:
+    get:
+      tags: [Admin]
+      summary: Metrics and analytics
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { description: Metrics payload }
+
+  /api/admin/users:
+    get:
+      tags: [Admin]
+      summary: Admin users list
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer }
+      responses:
+        "200": { description: Results }
+
+  /api/admin/users/{id}/verify:
+    post:
+      tags: [Admin]
+      summary: Verify user
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200": { description: OK }
+
+  /api/admin/users/{id}/unverify:
+    post:
+      tags: [Admin]
+      summary: Unverify user
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200": { description: OK }
+
+  /api/admin/users/{id}/ban:
+    post:
+      tags: [Admin]
+      summary: Ban user
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200": { description: OK }
+
+  /api/admin/users/{id}/unban:
+    post:
+      tags: [Admin]
+      summary: Unban user
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200": { description: OK }
+
+  /api/admin/users/{id}/suspend7:
+    post:
+      tags: [Admin]
+      summary: Suspend for 7 days
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200": { description: OK }
+
+  /api/admin/users/{id}/suspend:
+    post:
+      tags: [Admin]
+      summary: Suspend custom days
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                days: { type: integer }
+      responses:
+        "200": { description: OK }
+
+  /api/admin/users/{id}/unsuspend:
+    post:
+      tags: [Admin]
+      summary: Unsuspend user
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200": { description: OK }
+
+  /api/admin/banners:
+    get:
+      tags: [Admin]
+      summary: List banners
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { description: Results }
+    post:
+      tags: [Admin]
+      summary: Upload banner
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image]
+              properties:
+                image:
+                  type: string
+                  format: binary
+      responses:
+        "200": { description: OK }
+
+  /api/admin/banners/{id}/active:
+    post:
+      tags: [Admin]
+      summary: Set banner active
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                active: { type: boolean }
+      responses:
+        "200": { description: OK }
+
+  /api/admin/banners/{id}:
+    delete:
+      tags: [Admin]
+      summary: Delete banner
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200": { description: OK }
+
+  /api/admin/backup:
+    post:
+      tags: [Admin]
+      summary: Create ZIP backup
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { description: ZIP download }
+
+  /api/admin/restore:
+    post:
+      tags: [Admin]
+      summary: Restore from ZIP (requires admin 2FA token)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [backup]
+              properties:
+                backup:
+                  type: string
+                  format: binary
+      responses:
+        "200": { description: OK }
+
+  /api/admin/maintenance:
+    get:
+      tags: [Admin]
+      summary: Get maintenance state
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { description: OK }
+    post:
+      tags: [Admin]
+      summary: Set maintenance state
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: { type: boolean }
+                message: { type: string }
+      responses:
+        "200": { description: OK }

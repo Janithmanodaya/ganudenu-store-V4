@@ -1,0 +1,5 @@
+[
+  { "name": "Health", "method": "GET", "url": "/api/health", "expect": { "status": 200, "jsonKeys": ["ok","service","ts"] } },
+  { "name": "Maintenance Status", "method": "GET", "url": "/api/maintenance-status", "expect": { "status": 200, "jsonKeys": ["enabled","message"] } },
+  { "name": "Banners", "method": "GET", "url": "/api/banners", "expect": { "status": 200, "jsonKeys": ["results"] } }
+]

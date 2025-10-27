@@ -1,0 +1,21 @@
+{
+  "name": "ganudenu/php-backend",
+  "description": "PHP backend (parity with Node/Express Ganudenu) using SQLite and plain PHP routing.",
+  "type": "project",
+  "require": {
+    "php": "^8.1 || ^8.2",
+    "vlucas/phpdotenv": "^5.5",
+    "firebase/php-jwt": "^6.9",
+    "guzzlehttp/guzzle": "^7.8",
+    "intervention/image": "^2.7",
+    "phpmailer/phpmailer": "^6.8"
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^10.5"
+  },
+  "autoload": {
+    "psr-4": {
+      "App\\": "app/"
+    }
+  }
+}
