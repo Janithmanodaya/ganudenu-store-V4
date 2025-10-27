@@ -252,7 +252,8 @@ export default function NewListingPage() {
       fd.append('main_category', mainCategory)
       fd.append('title', title.trim())
       fd.append('description', description.trim())
-      for (const img of selectedImages) fd.append('images', img)
+      // Use array-style field name so PHP groups multiple files under $_FILES['images'][].
+      for (const img of selectedImages) fd.append('images[]', img)
       // include tag wanted ids (max 3) for server to persist on draft
       try {
         const ids = wantedTags.map(t => t.id).slice(0, 3)
