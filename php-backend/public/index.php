@@ -122,6 +122,10 @@ $router->add('POST', '/api/listings/payment-note', fn() => \App\Controllers\List
 $router->add('GET', '/api/admin/env-status', fn() => \App\Controllers\AdminController::envStatus(), ['rate_group' => 'ADMIN']);
 $router->add('GET', '/api/admin/config', fn() => \App\Controllers\AdminController::configGet(), ['rate_group' => 'ADMIN']);
 $router->add('POST', '/api/admin/config', fn() => \App\Controllers\AdminController::configPost(), ['rate_group' => 'ADMIN']);
+// Secure-config management
+$router->add('GET', '/api/admin/config-secure/status', fn() => \App\Controllers\AdminController::configSecureStatus(), ['rate_group' => 'ADMIN']);
+$router->add('POST', '/api/admin/config-secure/decrypt', fn() => \App\Controllers\AdminController::configSecureDecrypt(), ['rate_group' => 'ADMIN']);
+$router->add('POST', '/api/admin/config-secure/encrypt', fn() => \App\Controllers\AdminController::configSecureEncrypt(), ['rate_group' => 'ADMIN']);
 $router->add('GET', '/api/admin/prompts', fn() => \App\Controllers\AdminController::promptsGet(), ['rate_group' => 'ADMIN']);
 $router->add('POST', '/api/admin/prompts', fn() => \App\Controllers\AdminController::promptsPost(), ['rate_group' => 'ADMIN']);
 $router->add('GET', '/api/admin/pending', fn() => \App\Controllers\AdminController::pendingList(), ['rate_group' => 'ADMIN']);
@@ -148,6 +152,8 @@ $router->add('POST', '/api/admin/users/:id/suspend', fn($p) => \App\Controllers\
 $router->add('POST', '/api/admin/users/:id/unsuspend', fn($p) => \App\Controllers\AdminController::userUnsuspend($p), ['rate_group' => 'ADMIN']);
 $router->add('POST', '/api/admin/backup', fn() => \App\Controllers\AdminController::backup(), ['rate_group' => 'ADMIN']);
 $router->add('POST', '/api/admin/restore', fn() => \App\Controllers\AdminController::restore(), ['rate_group' => 'ADMIN']);
+// Admin: flag listing
+$router->add('POST', '/api/admin/flag', fn() => \App\Controllers\AdminController::flag(), ['rate_group' => 'ADMIN']);
 
 // Admin notifications
 $router->add('GET', '/api/admin/notifications', fn() => \App\Controllers\AdminController::notificationsList(), ['rate_group' => 'ADMIN']);

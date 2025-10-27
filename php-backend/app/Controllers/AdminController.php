@@ -4,6 +4,8 @@ namespace App\Controllers;
 use App\Services\DB;
 use App\Services\JWT;
 use App\Services\FacebookPoster;
+use App\Services\EmailService;
+use App\Services\SecureConfig;
 
 class AdminController
 {
@@ -233,6 +235,43 @@ class AdminController
         \json_response(['ok' => true]);
     }
 
+    // Secure-config (AES-256-GCM with scrypt-derived key) parity with Node
+    public static function configSecureStatus(): void
+    {
+        $admin = self::requireAdmin(); if (!$admin) return;
+        $st = SecureConfig::status();
+        \json_response($st);
+    }
+
+    public static function configSecureDecrypt(): void
+    {
+        $admin = self::requireAdmin(); if (!$admin) return;
+        $b = \read_body_json();
+        $pass = (string)($b['passphrase'] ?? '');
+        if ($pass === '') { \json_response(['error' => 'passphrase required'], 400); return; }
+        $res = SecureConfig::decryptFromFile($pass);
+        if (empty($res['ok'])) {
+            $code = (int)($res['status'] ?? 400);
+            \json_response(['error' => $res['error'] ?? 'Decryption failed'], $code);
+            return;
+        }
+        \json_response($res);
+    }
+
+    public static function configSecureEncrypt(): void
+    {
+        $admin = self::requireAdmin(); if (!$admin) return;
+        $b = \read_body_json();
+        $pass = (string)($b['passphrase'] ?? '');
+        if ($pass === '') { \json_response(['error' => 'passphrase required'], 400); return; }
+        if (!array_key_exists('config', $b)) { \json_response(['error' => 'config required'], 400); return; }
+        $jsonString = is_string($b['config']) ? $b['config'] : json_encode($b['config'], JSON_PRETTY_PRINT);
+        if (!is_string($jsonString)) { \json_response(['error' => 'Invalid config'], 400); return; }
+        $res = SecureConfig::encryptAndSave($pass, $jsonString);
+        if (empty($res['ok'])) { \json_response(['error' => $res['error'] ?? 'Failed to write secure config'], 500); return; }
+        \json_response(['ok' => true]);
+    }
+
     public static function promptsGet(): void
     {
         $admin = self::requireAdmin(); if (!$admin) return;
@@ -308,6 +347,128 @@ class AdminController
         \json_response(['ok' => true]);
     }
 
+    private static function listingMatchesSavedSearch(array $listing, array $search): bool
+    {
+        try {
+            $catOk = $search['category'] ? (string)$listing['main_category'] === (string)$search['category'] : true;
+            $locOk = $search['location'] ? (stripos((string)$listing['location'], (string)$search['location']) !== false) : true;
+            $p = isset($listing['price']) ? (float)$listing['price'] : null;
+            $pMinOk = isset($search['price_min']) ? ($p !== null && $p >= (float)$search['price_min']) : true;
+            $pMaxOk = isset($search['price_max']) ? ($p !== null && $p <= (float)$search['price_max']) : true;
+
+            $filters = json_decode((string)($search['filters_json'] ?? '{}'), true) ?: [];
+            $filtersOk = true;
+            if ($filters && count($filters)) {
+                $sj = json_decode((string)($listing['structured_json'] ?? '{}'), true) ?: [];
+                foreach ($filters as $k => $v) {
+                    if (!$v) continue;
+                    $key = $k === 'model' ? 'model_name' : $k;
+                    $got = strtolower((string)($sj[$key] ?? ''));
+                    if (is_array($v)) {
+                        $wants = array_map(fn($x) => strtolower((string)$x), $v);
+                        if ($key === 'model_name' || $key === 'sub_category') {
+                            $ok = false;
+                            foreach ($wants as $w) { if ($w && str_contains($got, $w)) { $ok = true; break; } }
+                            if (!$ok) { $filtersOk = false; break; }
+                        } else {
+                            $ok = false;
+                            foreach ($wants as $w) { if ($w && $got === $w) { $ok = true; break; } }
+                            if (!$ok) { $filtersOk = false; break; }
+                        }
+                    } else {
+                        $want = strtolower((string)$v);
+                        if ($key === 'model_name' || $key === 'sub_category') {
+                            if (!str_contains($got, $want)) { $filtersOk = false; break; }
+                        } else {
+                            if ($got !== $want) { $filtersOk = false; break; }
+                        }
+                    }
+                }
+            }
+            return $catOk && $locOk && $pMinOk && $pMaxOk && $filtersOk;
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
+
+    private static function listingMatchesWanted(array $listing, array $wanted): bool
+    {
+        try {
+            $cat = trim((string)($wanted['category'] ?? ''));
+            $catOk = $cat ? ((string)$listing['main_category'] === $cat) : true;
+
+            $locs = json_decode((string)($wanted['locations_json'] ?? '[]'), true) ?: [];
+            $fallbackLoc = trim((string)($wanted['location'] ?? ''));
+            if ($fallbackLoc) $locs[] = $fallbackLoc;
+            $listingLoc = strtolower((string)($listing['location'] ?? ''));
+            $locOk = $locs ? array_reduce($locs, function ($acc, $l) use ($listingLoc) { return $acc || (stripos($listingLoc, strtolower((string)$l)) !== false); }, false) : true;
+
+            $p = isset($listing['price']) ? (float)$listing['price'] : null;
+            $priceNotMatter = !empty($wanted['price_not_matter']);
+            $pMin = isset($wanted['price_min']) ? (float)$wanted['price_min'] : null;
+            $pMax = isset($wanted['price_max']) ? (float)$wanted['price_max'] : null;
+            $priceOk = $priceNotMatter ? true : ($p !== null ? (($pMin === null || $p >= $pMin) && ($pMax === null || $p <= $pMax)) : false);
+
+            $modelsOk = true;
+            $catLower = (string)$cat;
+            if (in_array($catLower, ['Vehicle','Mobile','Electronic'], true)) {
+                $models = json_decode((string)($wanted['models_json'] ?? '[]'), true) ?: [];
+                if ($models) {
+                    $sj = json_decode((string)($listing['structured_json'] ?? '{}'), true) ?: [];
+                    $gotModel = strtolower((string)($sj['model_name'] ?? $sj['model'] ?? ''));
+                    $modelsOk = array_reduce($models, function ($acc, $m) use ($gotModel) { return $acc || ($gotModel && stripos($gotModel, strtolower((string)$m)) !== false); }, false);
+                }
+            }
+
+            $yearOk = true;
+            if ($catLower === 'Vehicle') {
+                $yearMin = isset($wanted['year_min']) ? (int)$wanted['year_min'] : null;
+                $yearMax = isset($wanted['year_max']) ? (int)$wanted['year_max'] : null;
+                $sj = json_decode((string)($listing['structured_json'] ?? '{}'), true) ?: [];
+                $rawY = $sj['manufacture_year'] ?? $sj['year'] ?? $sj['model_year'] ?? null;
+                $y = $rawY !== null ? (int)preg_replace('/[^0-9]/', '', (string)$rawY) : null;
+                if ($yearMin !== null || $yearMax !== null) {
+                    if ($y === null) $yearOk = false;
+                    else $yearOk = (($yearMin === null || $y >= $yearMin) && ($yearMax === null || $y <= $yearMax));
+                }
+            }
+
+            $filtersOk = true;
+            $filters = json_decode((string)($wanted['filters_json'] ?? '{}'), true) ?: [];
+            if ($filters && count($filters)) {
+                $sj = json_decode((string)($listing['structured_json'] ?? '{}'), true) ?: [];
+                foreach ($filters as $k => $v) {
+                    if (!$v) continue;
+                    $key = $k === 'model' ? 'model_name' : $k;
+                    $got = strtolower((string)($sj[$key] ?? ''));
+                    if (is_array($v)) {
+                        $wants = array_map(fn($x) => strtolower((string)$x), $v);
+                        if ($key === 'model_name' || $key === 'sub_category') {
+                            $ok = false;
+                            foreach ($wants as $w) { if ($w && str_contains($got, $w)) { $ok = true; break; } }
+                            if (!$ok) { $filtersOk = false; break; }
+                        } else {
+                            $ok = false;
+                            foreach ($wants as $w) { if ($w && $got === $w) { $ok = true; break; } }
+                            if (!$ok) { $filtersOk = false; break; }
+                        }
+                    } else {
+                        $want = strtolower((string)$v);
+                        if ($key === 'model_name' || $key === 'sub_category') {
+                            if (!str_contains($got, $want)) { $filtersOk = false; break; }
+                        } else {
+                            if ($got !== $want) { $filtersOk = false; break; }
+                        }
+                    }
+                }
+            }
+
+            return $catOk && $locOk && $priceOk && $modelsOk && $yearOk && $filtersOk;
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
+
     public static function pendingApprove(array $params): void
     {
         $admin = self::requireAdmin(); if (!$admin) return;
@@ -316,7 +477,7 @@ class AdminController
         DB::exec("CREATE TABLE IF NOT EXISTS admin_actions (id INTEGER PRIMARY KEY AUTOINCREMENT, admin_id INTEGER NOT NULL, listing_id INTEGER NOT NULL, action TEXT NOT NULL, reason TEXT, ts TEXT NOT NULL)");
         DB::exec("INSERT INTO admin_actions (admin_id, listing_id, action, ts) VALUES (?, ?, 'approve', ?)", [$admin['id'], $id, gmdate('c')]);
 
-        $listing = DB::one("SELECT id, title, owner_email, main_category, remark_number FROM listings WHERE id = ?", [$id]);
+        $listing = DB::one("SELECT id, title, owner_email, main_category, location, price, structured_json, phone FROM listings WHERE id = ?", [$id]);
         if (!empty($listing['owner_email'])) {
             DB::exec("DELETE FROM notifications WHERE listing_id = ? AND type = 'pending'", [$id]);
             DB::exec("
@@ -325,11 +486,119 @@ class AdminController
             ", ['Listing Approved', 'Good news! Your ad "' . $listing['title'] . "\" (#{$id}) has been approved and is now live.", strtolower(trim((string)$listing['owner_email'])), gmdate('c'), $id]);
         }
 
-        // Non-blocking Facebook poster call
+        // Facebook poster (best-effort)
         $fb = FacebookPoster::postApproval($listing, $admin['email']);
+        $fbUrl = null;
         if (!empty($fb['url'])) {
-            DB::exec("UPDATE listings SET facebook_post_url = ? WHERE id = ?", [$fb['url'], $id]);
+            $fbUrl = (string)$fb['url'];
+            DB::exec("UPDATE listings SET facebook_post_url = ? WHERE id = ?", [$fbUrl, $id]);
         }
+
+        // Saved searches notifications
+        try {
+            $searches = DB::all("SELECT * FROM saved_searches");
+            foreach ($searches as $s) {
+                if (self::listingMatchesSavedSearch($listing, $s)) {
+                    DB::exec("
+                      INSERT INTO notifications (title, message, target_email, created_at, type, listing_id, meta_json)
+                      VALUES (?, ?, ?, ?, 'saved_search', ?, ?)
+                    ", ['New listing matches your search', 'A new "' . ($listing['title'] ?? '') . '" matches your saved search.', strtolower(trim((string)$s['user_email'])), gmdate('c'), $listing['id'], json_encode(['saved_search_id' => (int)$s['id']])]);
+                }
+            }
+        } catch (\Throwable $e) {}
+
+        // Wanted reverse notifications (buyers and seller)
+        try {
+            $wantedRows = DB::all("SELECT * FROM wanted_requests WHERE status = 'open'");
+            foreach ($wantedRows as $w) {
+                if (self::listingMatchesWanted($listing, $w)) {
+                    DB::exec("
+                      INSERT INTO notifications (title, message, target_email, created_at, type, listing_id, meta_json)
+                      VALUES (?, ?, ?, ?, 'wanted_match_buyer', ?, ?)
+                    ", ['New ad matches your Wanted request', 'Match: "' . $listing['title'] . '". View the ad for details.', strtolower(trim((string)$w['user_email'])), gmdate('c'), $listing['id'], json_encode(['wanted_id' => (int)$w['id']])]);
+                    // Email buyer (best-effort)
+                    try {
+                        $domain = getenv('PUBLIC_DOMAIN') ?: 'https://ganudenu.store';
+                        $html = '<div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;">'
+                            . '<h2 style="margin:0 0 10px 0;">New match for your Wanted request</h2>'
+                            . '<p style="margin:0 0 10px 0;">Matched ad: <strong>' . htmlspecialchars((string)$listing['title'], ENT_QUOTES, 'UTF-8') . '</strong></p>'
+                            . '<p style="margin:10px 0 0 0;"><a href="' . $domain . '/listing/' . (int)$listing['id'] . '" style="color:#0b5fff;text-decoration:none;">View ad</a></p>'
+                            . '</div>';
+                        EmailService::send(strtolower(trim((string)$w['user_email'])), 'New match for your Wanted request', $html);
+                    } catch (\Throwable $e) {}
+                    $owner = strtolower(trim((string)$listing['owner_email'] ?? ''));
+                    if ($owner) {
+                        DB::exec("
+                          INSERT INTO notifications (title, message, target_email, created_at, type, listing_id, meta_json)
+                          VALUES (?, ?, ?, ?, 'wanted_match_seller', ?, ?)
+                        ", ['Immediate buyer request for your item', 'A buyer posted: "' . ($w['title'] ?? '') . '". Your ad may match.', $owner, gmdate('c'), $listing['id'], json_encode(['wanted_id' => (int)$w['id']])]);
+                        // Email seller (best-effort)
+                        try {
+                            $domain = getenv('PUBLIC_DOMAIN') ?: 'https://ganudenu.store';
+                            $html = '<div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;">'
+                                . '<h2 style="margin:0 0 10px 0;">Immediate buyer request</h2>'
+                                . '<p style="margin:0 0 10px 0;">A buyer posted: "<strong>' . htmlspecialchars((string)$w['title'], ENT_QUOTES, 'UTF-8') . '</strong>". Your ad "<strong>' . htmlspecialchars((string)$listing['title'], ENT_QUOTES, 'UTF-8') . '</strong>" may match.</p>'
+                                . '<p style="margin:10px 0 0 0;"><a href="' . $domain . '/listing/' . (int)$listing['id'] . '" style="color:#0b5fff;text-decoration:none;">View your ad</a></p>'
+                                . '</div>';
+                            EmailService::send($owner, 'Immediate buyer request for your item', $html);
+                        } catch (\Throwable $e) {}
+                    }
+                }
+            }
+        } catch (\Throwable $e) {}
+
+        // Tagged wanted notifications (explicit tags)
+        try {
+            $tagRows = DB::all("SELECT wanted_id FROM listing_wanted_tags WHERE listing_id = ?", [$id]);
+            if (!empty($tagRows)) {
+                foreach ($tagRows as $row) {
+                    $wid = (int)$row['wanted_id'];
+                    if ($wid > 0) {
+                        $wanted = DB::one("SELECT id, user_email, title FROM wanted_requests WHERE id = ?", [$wid]);
+                        if ($wanted && !empty($wanted['user_email'])) {
+                            DB::exec("
+                              INSERT INTO notifications (title, message, target_email, created_at, type, listing_id, meta_json)
+                              VALUES (?, ?, ?, ?, 'wanted_tag_buyer', ?, ?)
+                            ", ['A new ad was posted for your request', 'Tagged by seller: "' . ($listing['title'] ?? '') . '".', strtolower(trim((string)$wanted['user_email'])), gmdate('c'), $id, json_encode(['wanted_id' => (int)$wanted['id']])]);
+                            // Email buyer (best-effort)
+                            try {
+                                $domain = getenv('PUBLIC_DOMAIN') ?: 'https://ganudenu.store';
+                                $html = '<div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;">'
+                                    . '<h2 style="margin:0 0 10px 0;">A new ad was posted for your request</h2>'
+                                    . '<p style="margin:0 0 10px 0;">Seller tagged your request: <strong>' . htmlspecialchars((string)$wanted['title'], ENT_QUOTES, 'UTF-8') . '</strong></p>'
+                                    . '<p style="margin:0 0 10px 0;">Ad: <strong>' . htmlspecialchars((string)$listing['title'], ENT_QUOTES, 'UTF-8') . '</strong></p>'
+                                    . '<p style="margin:10px 0 0 0;"><a href="' . $domain . '/listing/' . (int)$listing['id'] . '" style="color:#0b5fff;text-decoration:none;">View ad</a></p>'
+                                    . '</div>';
+                                EmailService::send(strtolower(trim((string)$wanted['user_email'])), 'A new ad was posted for your request', $html);
+                            } catch (\Throwable $e) {}
+                        }
+                    }
+                }
+            }
+        } catch (\Throwable $e) {}
+
+        // Facebook post notification + optional email_on_approve
+        try {
+            if ($fbUrl && !empty($listing['owner_email'])) {
+                $target = strtolower(trim((string)$listing['owner_email']));
+                DB::exec("
+                  INSERT INTO notifications (title, message, target_email, created_at, type, listing_id, meta_json)
+                  VALUES (?, ?, ?, ?, 'facebook_post', ?, ?)
+                ", ['Your ad was shared on Facebook', 'Your ad "' . ($listing['title'] ?? '') . '" has been shared on our Facebook page. View it here: ' . $fbUrl, $target, gmdate('c'), (int)$listing['id'], json_encode(['facebook_post_url' => $fbUrl])]);
+
+                $cfg = DB::one("SELECT email_on_approve FROM admin_config WHERE id = 1");
+                $emailOnApprove = !!($cfg && $cfg['email_on_approve']);
+                if ($emailOnApprove) {
+                    $html = '<div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;">'
+                        . '<h2 style="margin:0 0 10px 0;">Your ad was shared on Facebook</h2>'
+                        . '<p style="margin:0 0 8px 0;">We have shared your approved ad "<strong>' . htmlspecialchars((string)$listing['title'], ENT_QUOTES, 'UTF-8') . '</strong>" on our Facebook page.</p>'
+                        . '<p style="margin:0 0 12px 0;"><a href="' . htmlspecialchars($fbUrl, ENT_QUOTES, 'UTF-8') . '" style="color:#0b5fff;text-decoration:none;">View Facebook post</a></p>'
+                        . '<p style="color:#666;font-size:12px;margin:0;">Listing ID: ' . (int)$listing['id'] . '</p>'
+                        . '</div>';
+                    try { EmailService::send($target, 'Your ad was shared on Facebook', $html); } catch (\Throwable $e) {}
+                }
+            }
+        } catch (\Throwable $e) {}
 
         \json_response(['ok' => true]);
     }
@@ -373,16 +642,84 @@ class AdminController
         foreach ($ids as $id) {
             $stmt->execute([$id]);
             $audit->execute([$admin['id'], $id, gmdate('c')]);
-            $listing = DB::one("SELECT id, title, owner_email, main_category, remark_number FROM listings WHERE id = ?", [$id]);
+            $listing = DB::one("SELECT id, title, owner_email, main_category, location, price, structured_json, phone FROM listings WHERE id = ?", [$id]);
             if (!empty($listing['owner_email'])) {
                 $delPending->execute([$id]);
                 $insApproved->execute(['Listing Approved', 'Good news! Your ad "' . $listing['title'] . "\" (#{$id}) has been approved and is now live.", strtolower(trim((string)$listing['owner_email'])), gmdate('c'), $id]);
             }
-            // Fire-and-forget Facebook post
+            // Facebook post
             $fb = FacebookPoster::postApproval($listing, $admin['email']);
-            if (!empty($fb['url'])) {
-                DB::exec("UPDATE listings SET facebook_post_url = ? WHERE id = ?", [$fb['url'], $id]);
+            $fbUrl = !empty($fb['url']) ? (string)$fb['url'] : null;
+            if ($fbUrl) {
+                DB::exec("UPDATE listings SET facebook_post_url = ? WHERE id = ?", [$fbUrl, $id]);
+                // Notify owner and optional email
+                try {
+                    $target = strtolower(trim((string)$listing['owner_email']));
+                    DB::exec("
+                      INSERT INTO notifications (title, message, target_email, created_at, type, listing_id, meta_json)
+                      VALUES (?, ?, ?, ?, 'facebook_post', ?, ?)
+                    ", ['Your ad was shared on Facebook', 'Your ad "' . ($listing['title'] ?? '') . '" has been shared on our Facebook page. View it here: ' . $fbUrl, $target, gmdate('c'), (int)$listing['id'], json_encode(['facebook_post_url' => $fbUrl])]);
+                    $cfg = DB::one("SELECT email_on_approve FROM admin_config WHERE id = 1");
+                    if ($cfg && !empty($cfg['email_on_approve'])) {
+                        $domain = getenv('PUBLIC_DOMAIN') ?: 'https://ganudenu.store';
+                        $html = '<div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;">'
+                            . '<h2 style="margin:0 0 10px 0;">Your ad was shared on Facebook</h2>'
+                            . '<p style="margin:0 0 8px 0;">We have shared your approved ad "<strong>' . htmlspecialchars((string)$listing['title'], ENT_QUOTES, 'UTF-8') . '</strong>" on our Facebook page.</p>'
+                            . '<p style="margin:0 0 12px 0;"><a href="' . htmlspecialchars($fbUrl, ENT_QUOTES, 'UTF-8') . '" style="color:#0b5fff;text-decoration:none;">View Facebook post</a></p>'
+                            . '<p style="color:#666;font-size:12px;margin:0;">Listing ID: ' . (int)$listing['id'] . '</p>'
+                            . '</div>';
+                        try { EmailService::send($target, 'Your ad was shared on Facebook', $html); } catch (\Throwable $e) {}
+                    }
+                } catch (\Throwable $e) {}
             }
+
+            // Saved search notifications
+            try {
+                $searches = DB::all("SELECT * FROM saved_searches");
+                foreach ($searches as $s) {
+                    if (self::listingMatchesSavedSearch($listing, $s)) {
+                        DB::exec("
+                          INSERT INTO notifications (title, message, target_email, created_at, type, listing_id, meta_json)
+                          VALUES (?, ?, ?, ?, 'saved_search', ?, ?)
+                        ", ['New listing matches your search', 'A new "' . ($listing['title'] ?? '') . '" matches your saved search.', strtolower(trim((string)$s['user_email'])), gmdate('c'), $listing['id'], json_encode(['saved_search_id' => (int)$s['id']])]);
+                    }
+                }
+            } catch (\Throwable $e) {}
+
+            // Wanted reverse notifications and tag-based
+            try {
+                $wantedRows = DB::all("SELECT * FROM wanted_requests WHERE status = 'open'");
+                foreach ($wantedRows as $w) {
+                    if (self::listingMatchesWanted($listing, $w)) {
+                        DB::exec("
+                          INSERT INTO notifications (title, message, target_email, created_at, type, listing_id, meta_json)
+                          VALUES (?, ?, ?, ?, 'wanted_match_buyer', ?, ?)
+                        ", ['New ad matches your Wanted request', 'Match: "' . $listing['title'] . '". View the ad for details.', strtolower(trim((string)$w['user_email'])), gmdate('c'), $listing['id'], json_encode(['wanted_id' => (int)$w['id']])]);
+                        $owner = strtolower(trim((string)$listing['owner_email'] ?? ''));
+                        if ($owner) {
+                            DB::exec("
+                              INSERT INTO notifications (title, message, target_email, created_at, type, listing_id, meta_json)
+                              VALUES (?, ?, ?, ?, 'wanted_match_seller', ?, ?)
+                            ", ['Immediate buyer request for your item', 'A buyer posted: "' . ($w['title'] ?? '') . '". Your ad may match.', $owner, gmdate('c'), $listing['id'], json_encode(['wanted_id' => (int)$w['id']])]);
+                        }
+                    }
+                }
+                $tagRows = DB::all("SELECT wanted_id FROM listing_wanted_tags WHERE listing_id = ?", [$id]);
+                if (!empty($tagRows)) {
+                    foreach ($tagRows as $row) {
+                        $wid = (int)$row['wanted_id'];
+                        if ($wid > 0) {
+                            $wanted = DB::one("SELECT id, user_email, title FROM wanted_requests WHERE id = ?", [$wid]);
+                            if ($wanted && !empty($wanted['user_email'])) {
+                                DB::exec("
+                                  INSERT INTO notifications (title, message, target_email, created_at, type, listing_id, meta_json)
+                                  VALUES (?, ?, ?, ?, 'wanted_tag_buyer', ?, ?)
+                                ", ['A new ad was posted for your request', 'Tagged by seller: "' . ($listing['title'] ?? '') . '".', strtolower(trim((string)$wanted['user_email'])), gmdate('c'), $id, json_encode(['wanted_id' => (int)$wanted['id']])]);
+                            }
+                        }
+                    }
+                }
+            } catch (\Throwable $e) {}
         }
         \json_response(['ok' => true]);
     }
@@ -861,6 +1198,19 @@ class AdminController
         $admin = self::requireAdmin(); if (!$admin) return;
         $id = (int)($params['id'] ?? 0);
         DB::exec("UPDATE users SET suspended_until = NULL WHERE id = ?", [$id]);
+        \json_response(['ok' => true]);
+    }
+
+    // Admin flag listing
+    public static function flag(): void
+    {
+        $admin = self::requireAdmin(); if (!$admin) return;
+        $b = \read_body_json();
+        $listingId = (int)($b['listing_id'] ?? 0);
+        $reason = trim((string)($b['reason'] ?? ''));
+        if (!$listingId || $reason === '') { \json_response(['error' => 'listing_id and reason required'], 400); return; }
+        DB::exec("CREATE TABLE IF NOT EXISTS admin_actions (id INTEGER PRIMARY KEY AUTOINCREMENT, admin_id INTEGER NOT NULL, listing_id INTEGER NOT NULL, action TEXT NOT NULL, reason TEXT, ts TEXT NOT NULL)");
+        DB::exec("INSERT INTO admin_actions (admin_id, listing_id, action, reason, ts) VALUES (?, ?, 'flag', ?, ?)", [$admin['id'], $listingId, $reason, gmdate('c')]);
         \json_response(['ok' => true]);
     }
 
