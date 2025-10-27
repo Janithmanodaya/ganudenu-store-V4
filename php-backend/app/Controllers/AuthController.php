@@ -128,7 +128,6 @@ class AuthController
         if ($domainUrl) {
             try { $cookieDomain = parse_url($domainUrl, PHP_URL_HOST) ?: ''; } catch (\Throwable $e) {}
         }
-        // Parity with Node: always SameSite=None; Secure only in production.
         // Compute cookie domain: omit for localhost/IP, set for dotted hosts.
         $domainAttr = '';
         if ($cookieDomain) {
@@ -138,13 +137,17 @@ class AuthController
                 $domainAttr = $cookieDomain;
             }
         }
+        // Browser rule: SameSite=None requires Secure. In dev (http), use Lax so cookie is accepted.
+        $sameSite = $isProd ? 'None' : 'Lax';
+        $secure = $isProd ? true : false;
+
         return [
             'expires' => time() + 7 * 24 * 60 * 60,
             'path' => '/',
             'domain' => $domainAttr,
-            'secure' => $isProd ? true : false,
+            'secure' => $secure,
             'httponly' => true,
-            'samesite' => 'None'
+            'samesite' => $sameSite
         ];
     }
 
