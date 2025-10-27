@@ -55,23 +55,25 @@ class Router
                 ];
                 $maxEnv = getenv("RATE_{$gUpper}_MAX");
                 $winEnv = getenv("RATE_{$gUpper}_WINDOW_MS");
-                $max = (int) ($maxEnv !== false ? $maxEnv : 0);
-                $win = (int) ($winEnv !== false ? $winEnv : 0);
-                if ((!$max || !$win) && isset($defaults[$gUpper])) {
+                $max = ($maxEnv !== false) ? (int) $maxEnv : null;
+                $win = ($winEnv !== false) ? (int) $winEnv : null;
+                if (isset($defaults[$gUpper])) {
                     $def = $defaults[$gUpper];
-                    if (!$max) {
+                    if ($max === null) {
                         $max = (int) $def['max'];
                         @putenv("RATE_{$gUpper}_MAX={$max}");
                         $_ENV["RATE_{$gUpper}_MAX"] = (string)$max;
                     }
-                    if (!$win) {
+                    if ($win === null) {
                         $win = (int) $def['win'];
                         @putenv("RATE_{$gUpper}_WINDOW_MS={$win}");
                         $_ENV["RATE_{$gUpper}_WINDOW_MS"] = (string)$win;
                     }
                 }
-                if ($max && $win) {
-                    if (!RateLimiter::check(strtolower($gUpper), $max, $win)) {
+                $maxVal = (int) ($max ?? 0);
+                $winVal = (int) ($win ?? 0);
+                if ($maxVal && $winVal) {
+                    if (!RateLimiter::check(strtolower($gUpper), $maxVal, $winVal)) {
                         http_response_code(429);
                         header('Content-Type: application/json');
                         echo json_encode(['error' => 'Too Many Requests']);
