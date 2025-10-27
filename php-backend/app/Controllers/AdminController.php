@@ -1312,14 +1312,42 @@ class AdminController
     {
         $admin = self::requireAdmin(); if (!$admin) return;
         $baseDir = realpath(__DIR__ . '/../../..') ?: (__DIR__ . '/../../..');
-        $uploadsDir = $baseDir . '/data/uploads';
-        $dbPath = getenv('DB_PATH') ?: ($baseDir . '/data/ganudenu.sqlite');
+        $dataDir = $baseDir . '/data';
+        $uploadsDir = $dataDir . '/uploads';
+        $tmpAiDir = $dataDir . '/tmp_ai';
+        $dbPath = getenv('DB_PATH') ?: ($dataDir . '/ganudenu.sqlite');
+        $secureConfigPath = $dataDir . '/secure-config.enc';
+
+        // Create a consistent DB snapshot (prefer VACUUM INTO; fallback to checkpoint + copy)
+        $snapshot = sys_get_temp_dir() . '/ganudenu_db_snapshot_' . date('Ymd_His') . '.sqlite';
+        $snapshotOk = false;
+        try {
+            $pdo = \App\Services\DB::conn();
+            // Flush WAL and try VACUUM INTO
+            try { $pdo->exec("PRAGMA wal_checkpoint(TRUNCATE)"); } catch (\Throwable $e) {}
+            $pdo->exec("VACUUM INTO '" . str_replace("'", "''", $snapshot) . "'");
+            $snapshotOk = is_file($snapshot);
+        } catch (\Throwable $e) {
+            $snapshotOk = false;
+        }
+        if (!$snapshotOk) {
+            try {
+                $pdo = \App\Services\DB::conn();
+                try { $pdo->exec("PRAGMA wal_checkpoint(FULL)"); } catch (\Throwable $e) {}
+                if (is_file($dbPath)) {
+                    @copy($dbPath, $snapshot);
+                    $snapshotOk = is_file($snapshot);
+                }
+            } catch (\Throwable $e) { $snapshotOk = false; }
+        }
 
         $zip = new \ZipArchive();
         $tmpZip = sys_get_temp_dir() . '/ganudenu_backup_' . date('Ymd_His') . '.zip';
         if ($zip->open($tmpZip, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) !== true) {
             \json_response(['error' => 'Failed to create ZIP'], 500); return;
         }
+
+        // Include uploads
         if (is_dir($uploadsDir)) {
             $files = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($uploadsDir, \FilesystemIterator::SKIP_DOTS), \RecursiveIteratorIterator::SELF_FIRST);
             foreach ($files as $file) {
@@ -1329,16 +1357,52 @@ class AdminController
                 $zip->addFile($path, 'uploads/' . $rel);
             }
         }
-        if (is_file($dbPath)) {
+
+        // Include tmp_ai directory
+        if (is_dir($tmpAiDir)) {
+            $files = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($tmpAiDir, \FilesystemIterator::SKIP_DOTS), \RecursiveIteratorIterator::SELF_FIRST);
+            foreach ($files as $file) {
+                $path = $file->getRealPath();
+                $rel = substr($path, strlen($tmpAiDir) + 1);
+                if ($file->isDir()) continue;
+                $zip->addFile($path, 'tmp_ai/' . $rel);
+            }
+        }
+
+        // Include secure-config.enc
+        if (is_file($secureConfigPath)) {
+            $zip->addFile($secureConfigPath, 'secure-config.enc');
+        }
+
+        // Include DB snapshot
+        if ($snapshotOk && is_file($snapshot)) {
+            $zip->addFile($snapshot, 'ganudenu.sqlite');
+        } elseif (is_file($dbPath)) {
+            // Fallback to current DB file if snapshot failed
             $zip->addFile($dbPath, 'ganudenu.sqlite');
         }
+
+        // Meta.json
+        $meta = [
+            'created_at' => gmdate('c'),
+            'db_snapshot_size_bytes' => (is_file($snapshot) ? (int)filesize($snapshot) : (is_file($dbPath) ? (int)filesize($dbPath) : 0)),
+            'sqlite_version' => null
+        ];
+        try {
+            $row = \App\Services\DB::one("SELECT sqlite_version() AS v");
+            if ($row && isset($row['v'])) $meta['sqlite_version'] = (string)$row['v'];
+        } catch (\Throwable $e) {}
+        $zip->addFromString('meta.json', json_encode($meta, JSON_PRETTY_PRINT));
+
         $zip->close();
 
+        // Stream ZIP to client
         header('Content-Type: application/zip');
         header('Content-Disposition: attachment; filename="ganudenu_backup.zip"');
         header('Content-Length: ' . filesize($tmpZip));
         readfile($tmpZip);
         @unlink($tmpZip);
+        if (is_file($snapshot)) @unlink($snapshot);
     }
 
     public static function restore(): void
@@ -1353,26 +1417,127 @@ class AdminController
             \json_response(['error' => 'Invalid ZIP'], 400); return;
         }
         $baseDir = realpath(__DIR__ . '/../../..') ?: (__DIR__ . '/../../..');
-        $uploadsDir = $baseDir . '/data/uploads';
-        $dbPath = getenv('DB_PATH') ?: ($baseDir . '/data/ganudenu.sqlite');
+        $dataDir = $baseDir . '/data';
+        $uploadsDir = $dataDir . '/uploads';
+        $tmpAiDir = $dataDir . '/tmp_ai';
+        $dbPath = getenv('DB_PATH') ?: ($dataDir . '/ganudenu.sqlite');
+        $secureConfigPath = $dataDir . '/secure-config.enc';
 
-        // Restore DB
+        // Helper: safe join + whitelist (zip-slip protection)
+        $safeJoin = function (string $base, string $rel): ?string {
+            $baseReal = realpath($base) ?: $base;
+            $relNorm = str_replace('\\', '/', $rel);
+            // Reject absolute paths and traversal
+            if ($relNorm === '' || $relNorm[0] === '/' || str_contains($relNorm, '..')) return null;
+            // Clean segments conservatively
+            $parts = array_filter(explode('/', $relNorm), fn($seg) => $seg !== '' && $seg !== '.');
+            $path = $baseReal;
+            foreach ($parts as $seg) {
+                // Allow common filename chars only
+                if (!preg_match('/^[A-Za-z0-9._-]+$/', $seg)) return null;
+                $path .= '/' . $seg;
+            }
+            // Final containment check
+            $prefix = rtrim($baseReal, '/') . '/';
+            $candidate = $path;
+            if (str_starts_with($candidate, $prefix)) return $candidate;
+            return null;
+        };
+
+        // Restore DB using attach/copy sequence
+        $tempDb = sys_get_temp_dir() . '/ganudenu_restore_' . date('Ymd_His') . '.sqlite';
         $dbIndex = $zip->locateName('ganudenu.sqlite', \ZipArchive::FL_NODIR | \ZipArchive::FL_NOCASE);
         if ($dbIndex !== false) {
-            @mkdir(dirname($dbPath), 0775, true);
-            copy("zip://{$tmp}#ganudenu.sqlite", $dbPath);
+            @mkdir(dirname($tempDb), 0775, true);
+            if (!@copy("zip://{$tmp}#ganudenu.sqlite", $tempDb)) {
+                $zip->close();
+                \json_response(['error' => 'Failed to extract DB snapshot'], 500);
+                return;
+            }
+            try {
+                $pdo = \App\Services\DB::conn();
+                $pdo->exec("PRAGMA foreign_keys = OFF");
+                $pdo->exec("BEGIN EXCLUSIVE");
+                $pdo->exec("ATTACH DATABASE '" . str_replace("'", "''", $tempDb) . "' AS restore");
+
+                // Recreate tables
+                $tables = \App\Services\DB::all("SELECT name, sql FROM restore.sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'");
+                foreach ($tables as $t) {
+                    $name = (string)$t['name'];
+                    $sql = (string)$t['sql'];
+                    if ($name === '' || $sql === '') continue;
+                    $pdo->exec('DROP TABLE IF EXISTS "' . str_replace('"', '""', $name) . '"');
+                    $pdo->exec($sql);
+                    $pdo->exec('INSERT INTO "' . str_replace('"', '""', $name) . '" SELECT * FROM restore."' . str_replace('"', '""', $name) . '"');
+                }
+
+                // Recreate indexes, triggers, views
+                $others = \App\Services\DB::all("SELECT type, name, sql FROM restore.sqlite_master WHERE type IN ('index','trigger','view') AND sql IS NOT NULL");
+                foreach ($others as $o) {
+                    $type = strtolower((string)$o['type']);
+                    $name = (string)$o['name'];
+                    $sql = (string)$o['sql'];
+                    if ($sql === '') continue;
+                    if ($type === 'index') {
+                        $pdo->exec('DROP INDEX IF EXISTS "' . str_replace('"', '""', $name) . '"');
+                        $pdo->exec($sql);
+                    } elseif ($type === 'trigger') {
+                        $pdo->exec('DROP TRIGGER IF EXISTS "' . str_replace('"', '""', $name) . '"');
+                        $pdo->exec($sql);
+                    } elseif ($type === 'view') {
+                        $pdo->exec('DROP VIEW IF EXISTS "' . str_replace('"', '""', $name) . '"');
+                        $pdo->exec($sql);
+                    }
+                }
+
+                $pdo->exec("DETACH DATABASE restore");
+                $pdo->exec("COMMIT");
+                $pdo->exec("PRAGMA foreign_keys = ON");
+            } catch (\Throwable $e) {
+                try { \App\Services\DB::exec("ROLLBACK"); } catch (\Throwable $e2) {}
+                @unlink($tempDb);
+                $zip->close();
+                \json_response(['error' => 'Restore DB failed'], 500);
+                return;
+            }
+            @unlink($tempDb);
         }
-        // Restore uploads
+
+        // Restore uploads (with zip-slip whitelist)
+        @mkdir($uploadsDir, 0775, true);
         for ($i = 0; $i < $zip->numFiles; $i++) {
             $st = $zip->statIndex($i);
             $name = $st['name'];
             if (str_starts_with($name, 'uploads/')) {
                 $rel = substr($name, strlen('uploads/'));
-                $dest = $uploadsDir . '/' . $rel;
+                $dest = $safeJoin($uploadsDir, $rel);
+                if ($dest === null) continue;
                 @mkdir(dirname($dest), 0775, true);
-                copy("zip://{$tmp}#{$name}", $dest);
+                @copy("zip://{$tmp}#{$name}", $dest);
             }
         }
+
+        // Restore tmp_ai (with zip-slip whitelist)
+        @mkdir($tmpAiDir, 0775, true);
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $st = $zip->statIndex($i);
+            $name = $st['name'];
+            if (str_starts_with($name, 'tmp_ai/')) {
+                $rel = substr($name, strlen('tmp_ai/'));
+                $dest = $safeJoin($tmpAiDir, $rel);
+                if ($dest === null) continue;
+                @mkdir(dirname($dest), 0775, true);
+                @copy("zip://{$tmp}#{$name}", $dest);
+            }
+        }
+
+        // Restore secure-config.enc if present
+        $scIndex = $zip->locateName('secure-config.enc', \ZipArchive::FL_NODIR | \ZipArchive::FL_NOCASE);
+        if ($scIndex !== false) {
+            @mkdir(dirname($secureConfigPath), 0775, true);
+            @copy("zip://{$tmp}#secure-config.enc", $secureConfigPath);
+        }
+
         $zip->close();
         \json_response(['ok' => true]);
     }

@@ -2,6 +2,7 @@
 namespace App\Controllers;
 
 use App\Services\DB;
+use App\Services\EmailService;
 
 class WantedController
 {
@@ -77,7 +78,6 @@ class WantedController
         ]);
         $id = DB::lastInsertId();
 
-        // Immediately notify sellers with matching existing approved listings (in-app notifications)
         $sellerNotified = 0;
         try {
             $listings = DB::all("
@@ -119,7 +119,6 @@ class WantedController
             }
         } catch (\Throwable $e) {}
 
-        // Notify buyer that request was posted
         DB::exec("
           INSERT INTO notifications (title, message, target_email, created_at, type, meta_json)
           VALUES (?, ?, ?, ?, 'wanted_posted', ?)
@@ -206,20 +205,74 @@ class WantedController
         if (!$wid || !$lid) { \json_response(['error' => 'wanted_id and listing_id are required'], 400); return; }
         $wanted = DB::one("SELECT * FROM wanted_requests WHERE id = ?", [$wid]);
         if (!$wanted || $wanted['status'] !== 'open') { \json_response(['error' => 'Wanted request not open'], 404); return; }
-        $listing = DB::one("SELECT id, title, owner_email FROM listings WHERE id = ?", [$lid]);
+        $listing = DB::one("SELECT id, title, owner_email, structured_json, phone FROM listings WHERE id = ?", [$lid]);
         if (!$listing) { \json_response(['error' => 'Listing not found'], 404); return; }
         $owner = strtolower(trim((string)$listing['owner_email']));
         if ($owner !== $u['email']) { \json_response(['error' => 'You can only respond with your own listing'], 403); return; }
 
-        DB::exec("
+        // In-app notifications
+        $stmtBuyer = DB::conn()->prepare("
           INSERT INTO notifications (title, message, target_email, created_at, type, listing_id, meta_json)
           VALUES (?, ?, ?, ?, 'wanted_response', ?, ?)
-        ", ['A seller responded to your Wanted request', 'Seller offered: "' . $listing['title'] . '". ' . $message, strtolower(trim((string)$wanted['user_email'])), gmdate('c'), $listing['id'], json_encode(['wanted_id' => (int)$wanted['id'], 'seller_email' => $u['email']])]);
+        ");
+        $stmtBuyer->execute([
+            'A seller responded to your Wanted request',
+            'Seller offered: "' . $listing['title'] . '". ' . $message,
+            strtolower(trim((string)$wanted['user_email'])),
+            gmdate('c'),
+            (int)$listing['id'],
+            json_encode(['wanted_id' => (int)$wanted['id'], 'seller_email' => $u['email']])
+        ]);
+        $buyerNotifId = DB::lastInsertId();
 
-        DB::exec("
+        $stmtSeller = DB::conn()->prepare("
           INSERT INTO notifications (title, message, target_email, created_at, type, listing_id, meta_json)
           VALUES (?, ?, ?, ?, 'wanted_response_sent', ?, ?)
-        ", ['Your offer was sent', 'We notified the buyer about your ad "' . $listing['title'] . '".', $u['email'], gmdate('c'), $listing['id'], json_encode(['wanted_id' => (int)$wanted['id']])]);
+        ");
+        $stmtSeller->execute([
+            'Your offer was sent',
+            'We notified the buyer about your ad "' . $listing['title'] . '".',
+            $u['email'],
+            gmdate('c'),
+            (int)$listing['id'],
+            json_encode(['wanted_id' => (int)$wanted['id']])
+        ]);
+        $sellerNotifId = DB::lastInsertId();
+
+        // Email notifications (best-effort)
+        try {
+            $domain = getenv('PUBLIC_DOMAIN') ?: 'https://ganudenu.store';
+            $buyerEmail = strtolower(trim((string)$wanted['user_email']));
+            $sellerEmail = $u['email'];
+
+            $contactPhone = '';
+            $sj = [];
+            try { $sj = json_decode((string)($listing['structured_json'] ?? '{}'), true) ?: []; } catch (\Throwable $e) {}
+            $contactPhone = (string)($sj['phone'] ?? ($listing['phone'] ?? ''));
+
+            $htmlBuyer = '<div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;">'
+                . '<h2 style="margin:0 0 10px 0;">A seller responded to your Wanted request</h2>'
+                . '<p style="margin:0 0 8px 0;">Offer: <strong>' . htmlspecialchars((string)$listing['title'], ENT_QUOTES, 'UTF-8') . '</strong></p>'
+                . ($message !== '' ? '<p style="margin:0 0 10px 0;">Message: ' . nl2br(htmlspecialchars($message, ENT_QUOTES, 'UTF-8')) . '</p>' : '')
+                . ($contactPhone !== '' ? '<p style="margin:0 0 10px 0;">Phone: ' . htmlspecialchars($contactPhone, ENT_QUOTES, 'UTF-8') . '</p>' : '')
+                . '<p style="margin:10px 0 0 0;"><a href="' . $domain . '/listing/' . (int)$listing['id'] . '" style="color:#0b5fff;text-decoration:none;">View ad</a></p>'
+                . '</div>';
+            $sentBuyer = EmailService::send($buyerEmail, 'Seller responded: ' . ($listing['title'] ?? ''), $htmlBuyer);
+            if (!empty($sentBuyer['ok'])) {
+                DB::exec("UPDATE notifications SET emailed_at = ? WHERE id = ?", [gmdate('c'), $buyerNotifId]);
+            }
+
+            $htmlSeller = '<div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;">'
+                . '<h2 style="margin:0 0 10px 0;">Your offer was sent</h2>'
+                . '<p style="margin:0 0 10px 0;">We notified the buyer about your ad "<strong>' . htmlspecialchars((string)$listing['title'], ENT_QUOTES, 'UTF-8') . '</strong>".</p>'
+                . '</div>';
+            $sentSeller = EmailService::send($sellerEmail, 'Your offer was sent', $htmlSeller);
+            if (!empty($sentSeller['ok'])) {
+                DB::exec("UPDATE notifications SET emailed_at = ? WHERE id = ?", [gmdate('c'), $sellerNotifId]);
+            }
+        } catch (\Throwable $e) {
+            // continue without blocking
+        }
 
         \json_response(['ok' => true]);
     }
@@ -237,18 +290,61 @@ class WantedController
         $sellerNotified = 0;
         foreach ($wantedRows as $w) {
             if (self::listingMatchesWanted($listing, $w)) {
-                DB::exec("
+                $stmtB = DB::conn()->prepare("
                   INSERT INTO notifications (title, message, target_email, created_at, type, listing_id, meta_json)
                   VALUES (?, ?, ?, ?, 'wanted_match_buyer', ?, ?)
-                ", ['New ad matches your Wanted request', 'Match: "' . $listing['title'] . '". View the ad for details.', strtolower(trim((string)$w['user_email'])), gmdate('c'), $listing['id'], json_encode(['wanted_id' => (int)$w['id']])]);
+                ");
+                $stmtB->execute([
+                    'New ad matches your Wanted request',
+                    'Match: "' . $listing['title'] . '". View the ad for details.',
+                    strtolower(trim((string)$w['user_email'])),
+                    gmdate('c'),
+                    (int)$listing['id'],
+                    json_encode(['wanted_id' => (int)$w['id']])
+                ]);
+                $buyerNotifId = DB::lastInsertId();
                 $buyerNotified++;
+
                 $owner = strtolower(trim((string)$listing['owner_email']));
                 if ($owner) {
-                    DB::exec("
+                    $stmtS = DB::conn()->prepare("
                       INSERT INTO notifications (title, message, target_email, created_at, type, listing_id, meta_json)
                       VALUES (?, ?, ?, ?, 'wanted_match_seller', ?, ?)
-                    ", ['Immediate buyer request for your item', 'A buyer posted: "' . $w['title'] . '". Your ad may match.', $owner, gmdate('c'), $listing['id'], json_encode(['wanted_id' => (int)$w['id']])]);
+                    ");
+                    $stmtS->execute([
+                        'Immediate buyer request for your item',
+                        'A buyer posted: "' . $w['title'] . '". Your ad may match.',
+                        $owner,
+                        gmdate('c'),
+                        (int)$listing['id'],
+                        json_encode(['wanted_id' => (int)$w['id']])
+                    ]);
+                    $sellerNotifId = DB::lastInsertId();
                     $sellerNotified++;
+
+                    // Emails (best-effort)
+                    try {
+                        $domain = getenv('PUBLIC_DOMAIN') ?: 'https://ganudenu.store';
+                        $htmlBuyer = '<div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;">'
+                            . '<h2 style="margin:0 0 10px 0;">New match for your Wanted request</h2>'
+                            . '<p style="margin:0 0 10px 0;">Matched ad: <strong>' . htmlspecialchars((string)$listing['title'], ENT_QUOTES, 'UTF-8') . '</strong></p>'
+                            . '<p style="margin:10px 0 0 0;"><a href="' . $domain . '/listing/' . (int)$listing['id'] . '" style="color:#0b5fff;text-decoration:none;">View ad</a></p>'
+                            . '</div>';
+                        $sentB = EmailService::send(strtolower(trim((string)$w['user_email'])), 'New match for your Wanted request', $htmlBuyer);
+                        if (!empty($sentB['ok'])) {
+                            DB::exec("UPDATE notifications SET emailed_at = ? WHERE id = ?", [gmdate('c'), $buyerNotifId]);
+                        }
+
+                        $htmlSeller = '<div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;">'
+                            . '<h2 style="margin:0 0 10px 0;">Immediate buyer request</h2>'
+                            . '<p style="margin:0 0 10px 0;">A buyer posted: "<strong>' . htmlspecialchars((string)$w['title'], ENT_QUOTES, 'UTF-8') . '</strong>". Your ad "<strong>' . htmlspecialchars((string)$listing['title'], ENT_QUOTES, 'UTF-8') . '</strong>" may match.</p>'
+                            . '<p style="margin:10px 0 0 0;"><a href="' . $domain . '/listing/' . (int)$listing['id'] . '" style="color:#0b5fff;text-decoration:none;">View your ad</a></p>'
+                            . '</div>';
+                        $sentS = EmailService::send($owner, 'Immediate buyer request for your item', $htmlSeller);
+                        if (!empty($sentS['ok'])) {
+                            DB::exec("UPDATE notifications SET emailed_at = ? WHERE id = ?", [gmdate('c'), $sellerNotifId]);
+                        }
+                    } catch (\Throwable $e) {}
                 }
             }
         }

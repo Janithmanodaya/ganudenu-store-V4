@@ -159,6 +159,7 @@ $router->add('POST', '/api/admin/flag', fn() => \App\Controllers\AdminController
 $router->add('GET', '/api/admin/notifications', fn() => \App\Controllers\AdminController::notificationsList(), ['rate_group' => 'ADMIN']);
 $router->add('POST', '/api/admin/notifications', fn() => \App\Controllers\AdminController::notificationsCreate(), ['rate_group' => 'ADMIN']);
 $router->add('DELETE', '/api/admin/notifications/:id', fn($p) => \App\Controllers\AdminController::notificationsDelete($p), ['rate_group' => 'ADMIN']);
+$router->add('POST', '/api/admin/notifications/digests/saved-search', fn() => \App\Controllers\NotificationDigestController::savedSearchDigest(), ['rate_group' => 'ADMIN']);
 
 // Admin reports
 $router->add('GET', '/api/admin/reports', fn() => \App\Controllers\AdminController::reportsList(), ['rate_group' => 'ADMIN']);

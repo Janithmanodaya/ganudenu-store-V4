@@ -552,10 +552,11 @@ class ListingsController
         $wantedIds = array_slice(array_keys($wanted), 0, 3);
         $wantedJson = json_encode($wantedIds);
 
-        // For brevity, skip real SEO call in this scaffold; keep fields empty
-        $seo_title = '';
-        $seo_description = '';
-        $seo_keywords = '';
+        // AI-powered SEO metadata
+        $seoData = GeminiService::generateSeo($selectedCategory, $title, $description, $structured, $seoPrompt);
+        $seo_title = (string)($seoData['seo_title'] ?? '');
+        $seo_description = (string)($seoData['meta_description'] ?? '');
+        $seo_keywords = (string)($seoData['seo_keywords'] ?? '');
 
         $ts = gmdate('c');
         DB::exec("
