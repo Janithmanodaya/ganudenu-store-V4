@@ -55,13 +55,13 @@ if (is_file($autoload)) {
                 if ($val !== '') {
                     $first = $val[0];
                     $last = $val[strlen($val) - 1] ?? '';
-                    if (($first === '"' && $last === '"') || ($first === "'" && $last === "'")) {
+                    if (($first === '\"' && $last === '\"') || ($first === "'" && $last === "'")) {
                         $val = substr($val, 1, -1);
                     }
                 }
 
                 // Basic variable expansion: ${KEY} -> existing env
-                $val = preg_replace_callback('/\\$\\{([A-Za-z_][A-Za-z0-9_]*)\\}/', function ($m) {
+                $val = preg_replace_callback('/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/', function ($m) {
                     $k = $m[1];
                     $v = getenv($k);
                     return $v !== false ? $v : '';
@@ -283,6 +283,55 @@ function init_base_schema(): void {
         created_at TEXT NOT NULL
       )
     ");
+
+    // New: notifications + reads + saved_searches (parity with Node)
+    $pdo->exec("
+      CREATE TABLE IF NOT EXISTS notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        message TEXT NOT NULL,
+        target_email TEXT,
+        created_at TEXT NOT NULL,
+        type TEXT DEFAULT 'general',
+        listing_id INTEGER,
+        meta_json TEXT,
+        emailed_at TEXT
+      )
+    ");
+    $pdo->exec("CREATE INDEX IF NOT EXISTS idx_notifications_created ON notifications(created_at DESC)");
+    $pdo->exec("CREATE INDEX IF NOT EXISTS idx_notifications_target ON notifications(target_email)");
+    $pdo->exec("CREATE INDEX IF NOT EXISTS idx_notifications_type ON notifications(type)");
+    $pdo->exec("CREATE INDEX IF NOT EXISTS idx_notifications_listing ON notifications(listing_id)");
+    $pdo->exec("CREATE INDEX IF NOT EXISTS idx_notifications_emailed ON notifications(emailed_at)");
+
+    $pdo->exec("
+      CREATE TABLE IF NOT EXISTS notification_reads (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        notification_id INTEGER NOT NULL,
+        user_email TEXT NOT NULL,
+        read_at TEXT NOT NULL,
+        UNIQUE(notification_id, user_email)
+      )
+    ");
+    $pdo->exec("CREATE INDEX IF NOT EXISTS idx_notif_reads_user ON notification_reads(user_email)");
+    $pdo->exec("CREATE INDEX IF NOT EXISTS idx_notif_reads_notif ON notification_reads(notification_id)");
+
+    $pdo->exec("
+      CREATE TABLE IF NOT EXISTS saved_searches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_email TEXT NOT NULL,
+        name TEXT,
+        category TEXT,
+        location TEXT,
+        price_min REAL,
+        price_max REAL,
+        filters_json TEXT,
+        created_at TEXT NOT NULL
+      )
+    ");
+    $pdo->exec("CREATE INDEX IF NOT EXISTS idx_saved_searches_user ON saved_searches(user_email)");
+    $pdo->exec("CREATE INDEX IF NOT EXISTS idx_saved_searches_cat ON saved_searches(category)");
+    $pdo->exec("CREATE INDEX IF NOT EXISTS idx_saved_searches_loc ON saved_searches(location)");
 
     // Ensure single admin_config row
     $cfg = DB::one("SELECT id FROM admin_config WHERE id = 1");

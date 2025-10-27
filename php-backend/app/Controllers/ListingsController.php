@@ -60,6 +60,8 @@ class ListingsController
         $pdo->exec("CREATE TABLE IF NOT EXISTS listing_drafts (id INTEGER PRIMARY KEY AUTOINCREMENT, main_category TEXT NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL, structured_json TEXT, seo_title TEXT, seo_description TEXT, seo_keywords TEXT, seo_json TEXT, resume_file_url TEXT, owner_email TEXT, created_at TEXT NOT NULL, enhanced_description TEXT, wanted_tags_json TEXT, employee_profile INTEGER DEFAULT 0)");
         $pdo->exec("CREATE TABLE IF NOT EXISTS listing_draft_images (id INTEGER PRIMARY KEY AUTOINCREMENT, draft_id INTEGER NOT NULL, path TEXT NOT NULL, original_name TEXT NOT NULL)");
         $pdo->exec("CREATE TABLE IF NOT EXISTS listing_views (id INTEGER PRIMARY KEY AUTOINCREMENT, listing_id INTEGER NOT NULL, ip TEXT, viewer_email TEXT, ts TEXT NOT NULL, UNIQUE(listing_id, ip))");
+        // Link table for listing <-> wanted tags (from draft.wanted_tags_json)
+        $pdo->exec("CREATE TABLE IF NOT EXISTS listing_wanted_tags (id INTEGER PRIMARY KEY AUTOINCREMENT, listing_id INTEGER NOT NULL, wanted_id INTEGER NOT NULL, created_at TEXT NOT NULL, UNIQUE(listing_id, wanted_id))");
         $pdo->exec("CREATE INDEX IF NOT EXISTS idx_listings_status ON listings(status)");
         $pdo->exec("CREATE INDEX IF NOT EXISTS idx_listings_category ON listings(main_category)");
         $pdo->exec("CREATE INDEX IF NOT EXISTS idx_listings_created ON listings(created_at)");
@@ -516,7 +518,24 @@ class ListingsController
             : $baseContext;
 
         $structured = GeminiService::extractStructured($selectedCategory, $title, $description);
-        $seoObj = [];
+        // wanted_tags_json (optional): up to 3 wanted IDs
+        $wantedRaw = (string)($_POST['wanted_tags_json'] ?? '');
+        $wanted = [];
+        if ($wantedRaw !== '') {
+            try {
+                $arr = json_decode($wantedRaw, true);
+                if (is_array($arr)) {
+                    foreach ($arr as $x) {
+                        $n = (int)$x;
+                        if ($n > 0) $wanted[$n] = true;
+                        if (count($wanted) >= 3) break;
+                    }
+                }
+            } catch (\Throwable $e) {}
+        }
+        $wantedIds = array_slice(array_keys($wanted), 0, 3);
+        $wantedJson = json_encode($wantedIds);
+
         // For brevity, skip real SEO call in this scaffold; keep fields empty
         $seo_title = '';
         $seo_description = '';
@@ -526,7 +545,7 @@ class ListingsController
         DB::exec("
           INSERT INTO listing_drafts (main_category, title, description, structured_json, seo_title, seo_description, seo_keywords, owner_email, created_at, wanted_tags_json)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ", [$selectedCategory, $title, $description, json_encode($structured), $seo_title, $seo_description, $seo_keywords, $ownerEmail, $ts, json_encode([])]);
+        ", [$selectedCategory, $title, $description, json_encode($structured), $seo_title, $seo_description, $seo_keywords, $ownerEmail, $ts, $wantedJson]);
         $draftId = DB::lastInsertId();
         foreach ($stored as $s) {
             DB::exec("INSERT INTO listing_draft_images (draft_id, path, original_name) VALUES (?, ?, ?)", [$draftId, $s['path'], $s['original_name']]);
@@ -663,6 +682,19 @@ class ListingsController
             DB::exec("INSERT INTO listing_images (listing_id, path, original_name, medium_path) VALUES (?, ?, ?, ?)", [$listingId, $img['path'], $img['original_name'], null]);
         }
 
+        // Link wanted tags -> listing (best-effort)
+        $wantedArr = [];
+        try { $wantedArr = json_decode((string)($draft['wanted_tags_json'] ?? '[]'), true) ?: []; } catch (\Throwable $e) { $wantedArr = []; }
+        if (is_array($wantedArr) && count($wantedArr)) {
+            $ins = DB::conn()->prepare("INSERT OR IGNORE INTO listing_wanted_tags (listing_id, wanted_id, created_at) VALUES (?, ?, ?)");
+            foreach ($wantedArr as $widRaw) {
+                $wid = (int)$widRaw;
+                if ($wid > 0) {
+                    try { $ins->execute([$listingId, $wid, gmdate('c')]); } catch (\Throwable $e) {}
+                }
+            }
+        }
+
         // Pending notification for owner
         if ($ownerEmail) {
             DB::exec("
@@ -685,14 +717,51 @@ class ListingsController
         $v = $tok ? JWT::verify($tok) : ['ok' => false];
         if (!$v['ok']) { \json_response(['error' => 'Missing Authorization bearer token'], 401); return; }
         $email = strtolower((string)$v['decoded']['email']);
+
         $rows = DB::all("
-          SELECT id, main_category, title, status, created_at, valid_until, price, pricing_type, location, remark_number
+          SELECT id, main_category, title, description, seo_description, structured_json, price, pricing_type, location,
+                 status, valid_until, created_at, reject_reason, views, is_urgent, employee_profile, thumbnail_path
           FROM listings
           WHERE LOWER(owner_email) = LOWER(?)
           ORDER BY id DESC
           LIMIT 200
         ", [$email]);
-        \json_response(['results' => $rows]);
+
+        $firstStmt = DB::conn()->prepare("SELECT path, medium_path FROM listing_images WHERE listing_id = ? ORDER BY id ASC LIMIT 1");
+        $listStmt = DB::conn()->prepare("SELECT path, medium_path FROM listing_images WHERE listing_id = ? ORDER BY id ASC LIMIT 5");
+
+        $results = [];
+        foreach ($rows as $r) {
+            $firstStmt->execute([(int)$r['id']]);
+            $first = $firstStmt->fetch(\PDO::FETCH_ASSOC) ?: null;
+            $listStmt->execute([(int)$r['id']]);
+            $imgs = $listStmt->fetchAll(\PDO::FETCH_ASSOC) ?: [];
+            $thumbnail_url = self::filePathToUrl($r['thumbnail_path']) ?: self::filePathToUrl($first['medium_path'] ?? ($first['path'] ?? null));
+            $small_images = array_values(array_filter(array_map(function ($x) { return self::filePathToUrl($x['medium_path'] ?? $x['path']); }, $imgs)));
+            $results[] = [
+                'id' => (int)$r['id'],
+                'main_category' => $r['main_category'],
+                'title' => $r['title'],
+                'description' => $r['description'],
+                'seo_description' => $r['seo_description'],
+                'structured_json' => $r['structured_json'],
+                'price' => $r['price'],
+                'pricing_type' => $r['pricing_type'],
+                'location' => $r['location'],
+                'status' => $r['status'],
+                'valid_until' => $r['valid_until'],
+                'created_at' => $r['created_at'],
+                'reject_reason' => $r['reject_reason'],
+                'views' => (int)$r['views'],
+                'is_urgent' => !!$r['is_urgent'],
+                'urgent' => !!$r['is_urgent'],
+                'employee_profile' => !!$r['employee_profile'],
+                'thumbnail_url' => $thumbnail_url,
+                'small_images' => $small_images,
+            ];
+        }
+
+        \json_response(['results' => $results]);
     }
 
     public static function myDrafts(): void
@@ -704,14 +773,16 @@ class ListingsController
         $email = strtolower((string)$v['decoded']['email']);
         $employeeProfile = isset($_GET['employee_profile']) ? (int)$_GET['employee_profile'] : null;
         $sql = "
-          SELECT id, main_category, title, created_at, employee_profile
+          SELECT id, main_category, title, description, owner_email, created_at, employee_profile, resume_file_url
           FROM listing_drafts
           WHERE LOWER(owner_email) = LOWER(?)
         ";
         $params = [$email];
+        if ($employeeProfile !== null) { $sql .= " AND employee_profile = ?"; $params[] = $employeeProfile; }
         $sql .= " ORDER BY id DESC LIMIT 200";
-        if ($employeeProfile !== null) { $sql = str_replace("ORDER BY id DESC LIMIT 200", " AND employee_profile = ? ORDER BY id DESC LIMIT 200", $sql); $params[] = $employeeProfile; }
         $rows = DB::all($sql, $params);
+        // Normalize employee_profile to boolean
+        foreach ($rows as &$r) { $r['employee_profile'] = !!$r['employee_profile']; }
         \json_response(['results' => $rows]);
     }
 
@@ -724,7 +795,7 @@ class ListingsController
         $email = strtolower((string)$v['decoded']['email']);
         $id = (int)($params['id'] ?? 0);
         if (!$id) { \json_response(['error' => 'Invalid id'], 400); return; }
-        $row = DB::one("SELECT owner_email FROM listings WHERE id = ?", [$id]);
+        $row = DB::one("SELECT owner_email, thumbnail_path FROM listings WHERE id = ?", [$id]);
         if (!$row) { \json_response(['error' => 'Not found'], 404); return; }
         if (strtolower(trim((string)$row['owner_email'])) !== $email) { \json_response(['error' => 'Not authorized'], 403); return; }
         $imgs = DB::all("SELECT path, medium_path FROM listing_images WHERE listing_id = ?", [$id]);
@@ -777,22 +848,70 @@ class ListingsController
         self::ensureSchema();
         $category = trim((string)($_GET['category'] ?? ''));
         if (!$category) { \json_response(['error' => 'category is required'], 400); return; }
-        // Derive dynamic keys and values from existing Approved listings
-        $rows = DB::all("SELECT structured_json FROM listings WHERE status = 'Approved' AND main_category = ? ORDER BY id DESC LIMIT 500", [$category]);
-        $keys = ['sub_category','model_name','location','pricing_type'];
+
+        // Load recent approved listings for the category
+        $rows = DB::all("SELECT title, description, structured_json, location FROM listings WHERE status = 'Approved' AND main_category = ? ORDER BY id DESC LIMIT 800", [$category]);
+
+        // Build dynamic keys from structured_json across rows
+        $keysMap = [];
         $valuesByKey = [];
-        foreach ($keys as $k) $valuesByKey[$k] = [];
+
+        $baseKeys = ['sub_category','model_name','location','pricing_type'];
+        foreach ($baseKeys as $bk) { $keysMap[$bk] = true; $valuesByKey[$bk] = []; }
+
+        $inferVehicleSub = function (string $title, string $desc) {
+            $t = strtolower($title . ' ' . $desc);
+            if (preg_match('/\b(bike|motorcycle|scooter)\b/i', $t)) return 'Bike';
+            if (preg_match('/\b(car|sedan|hatchback|suv)\b/i', $t)) return 'Car';
+            if (preg_match('/\b(van)\b/i', $t)) return 'Van';
+            if (preg_match('/\b(bus)\b/i', $t)) return 'Bus';
+            return null;
+        };
+
         foreach ($rows as $r) {
             $sj = json_decode((string)($r['structured_json'] ?? '{}'), true) ?: [];
-            foreach ($keys as $k) {
-                $val = trim((string)($sj[$k] ?? ''));
-                if ($val) $valuesByKey[$k][$val] = true;
+            // Accumulate keys present
+            foreach ($sj as $k => $v) {
+                if (!is_scalar($v)) continue;
+                $k = (string)$k;
+                if ($k === '') continue;
+                $keysMap[$k] = true;
+                if (!isset($valuesByKey[$k])) $valuesByKey[$k] = [];
+                $val = trim((string)$v);
+                if ($val !== '') $valuesByKey[$k][$val] = true;
+            }
+            // Ensure location also captured
+            $loc = trim((string)($r['location'] ?? ''));
+            if ($loc !== '') { $valuesByKey['location'][$loc] = true; }
+
+            // Special: for Vehicle ensure sub_category is present or inferred
+            if ($category === 'Vehicle') {
+                $sub = trim((string)($sj['sub_category'] ?? ''));
+                if ($sub === '') {
+                    $inf = $inferVehicleSub((string)($r['title'] ?? ''), (string)($r['description'] ?? ''));
+                    if ($inf) { $valuesByKey['sub_category'][$inf] = true; }
+                }
             }
         }
+
+        // Normalize keys and prepare limited values
+        $keys = array_keys($keysMap);
+        // Keep only a reasonable set to avoid noisy UI
+        // Always include base keys first
+        $preferred = $baseKeys;
+        $otherKeys = array_values(array_diff($keys, $preferred));
+        sort($otherKeys);
+        $keys = array_values(array_unique(array_merge($preferred, $otherKeys)));
+
+        $outMap = [];
         foreach ($keys as $k) {
-            $valuesByKey[$k] = array_values(array_slice(array_keys($valuesByKey[$k]), 0, 50));
+            $vals = array_keys($valuesByKey[$k] ?? []);
+            sort($vals, SORT_NATURAL | SORT_FLAG_CASE);
+            $outMap[$k] = array_values(array_slice($vals, 0, 50));
         }
-        \json_response(['keys' => $keys, 'valuesByKey' => $valuesByKey]);
+
+        header('Cache-Control: public, max-age=60');
+        \json_response(['keys' => $keys, 'valuesByKey' => $outMap]);
     }
 
     private static function requireDraftOwnerEmail(int $draftId): ?string
