@@ -1058,6 +1058,16 @@ class AuthController
         $user = DB::one("SELECT id, email, is_admin, is_banned, suspended_until, username FROM users WHERE id = ?", [(int)$claims['user_id']]);
         if (!$user) { \json_response(['error' => 'User not found.'], 404); return; }
 
+        // Auto-promote if email matches ADMIN_EMAIL (parity with AdminController)
+        $claimsEmail = strtolower((string)($claims['email'] ?? ''));
+        $adminEmail = strtolower(trim((string)(getenv('ADMIN_EMAIL') ?: '')));
+        if ($user && !(int)$user['is_admin']) {
+            if ($adminEmail && $claimsEmail && $claimsEmail === $adminEmail) {
+                DB::exec("UPDATE users SET is_admin = 1 WHERE id = ?", [(int)$user['id']]);
+                $user['is_admin'] = 1;
+            }
+        }
+
         \json_response([
             'ok' => true,
             'email' => $user['email'],
