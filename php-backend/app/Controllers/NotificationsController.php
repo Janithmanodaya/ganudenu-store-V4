@@ -213,8 +213,11 @@ class NotificationsController
             \text_response(json_encode(['error' => 'Account suspended']), 403, 'application/json'); return;
         }
 
-        // Ensure the stream doesn't hit PHP's max_execution_time (esp. built-in dev server on Windows).
-        // We stream for a bounded window (e.g., 25s) then exit, letting EventSource auto-reconnect.
+        // Heuristic: PHP built-in dev server (cli-server) handles requests serially.
+        // Long-lived SSE connections can block other API calls. In that environment,
+        // return a single event and close quickly so the browser reconnects via polling.
+        $isCliServer = (PHP_SAPI === 'cli-server');
+
         @set_time_limit(0);
 
         SSE::start();
@@ -233,7 +236,15 @@ class NotificationsController
             return (int) ($row['c'] ?? 0);
         };
 
+        // Always send an initial event
         SSE::event('unread_count', ['unread_count' => $computeUnread()]);
+
+        if ($isCliServer) {
+            // Close immediately to avoid blocking other requests in dev server.
+            echo ": closing\n\n";
+            flush();
+            exit;
+        }
 
         $intervalMs = 30000;
         $lastEvent = microtime(true);
@@ -254,7 +265,7 @@ class NotificationsController
             usleep(250000);
         }
         // Explicitly end stream so EventSource reconnects quickly
-        echo ": closing\\n\\n";
+        echo ": closing\n\n";
         flush();
         exit;
     }
