@@ -69,6 +69,8 @@ export default function AdminPage() {
   const [chatMessages, setChatMessages] = useState([])
   const [chatInput, setChatInput] = useState('')
   const [sendEmailOnReply, setSendEmailOnReply] = useState(false)
+  const [chatLastId, setChatLastId] = useState(0)
+  const esChatRef = useRef(null)
 
   // Backup
   const backupFileRef = useRef(null)
@@ -507,6 +509,14 @@ export default function AdminPage() {
   }
   async function onUploadBanner(file) {
     if (!file) return
+    // Block SVG (backend will reject too, but provide early feedback)
+    const nameLower = (file && file.name) ? String(file.name).toLowerCase() : ''
+    const isSvg = (file && file.type && String(file.type).toLowerCase() === 'image/svg+xml') || nameLower.endsWith('.svg')
+    if (isSvg) {
+      setStatus('SVG images are not allowed. Please upload PNG, JPEG, WebP, GIF, or AVIF.')
+      if (fileRef.current) fileRef.current.value = ''
+      return
+    }
     try {
       const fd = new FormData()
       fd.append('image', file)
@@ -615,7 +625,10 @@ export default function AdminPage() {
       const data = await safeJson(r)
       if (!r.ok) throw new Error(data.error || 'Failed to load messages')
       setSelectedChatEmail(email)
-      setChatMessages(Array.isArray(data.results) ? data.results : [])
+      const rows = Array.isArray(data.results) ? data.results : []
+      setChatMessages(rows)
+      const maxId = rows.length ? Number(rows[rows.length - 1].id) : 0
+      if (Number.isFinite(maxId)) setChatLastId(maxId)
     } catch (e) {
       setStatus(`Error: ${e.message}`)
     }
@@ -664,6 +677,44 @@ export default function AdminPage() {
       setStatus(`Error: ${e.message}`)
     }
   }
+
+  // Live stream updates for selected conversation via SSE (cookie-auth)
+  useEffect(() => {
+    if (!selectedChatEmail) return
+    // Start after current lastId to avoid duplicates
+    const url = `/api/chats/admin/${encodeURIComponent(selectedChatEmail)}/stream${chatLastId ? `?last_id=${encodeURIComponent(chatLastId)}` : ''}`
+    let es
+    try {
+      es = new EventSource(url)
+      esChatRef.current = es
+      es.addEventListener('chat_messages', (e) => {
+        try {
+          const d = JSON.parse(e.data || '{}')
+          const rows = Array.isArray(d.results) ? d.results : []
+          if (!rows.length) return
+          setChatMessages(prev => {
+            const seen = new Set(prev.map(m => Number(m.id)))
+            const toAdd = rows.filter(r => !seen.has(Number(r.id)))
+            const next = [...prev, ...toAdd]
+            const maxId = next.length ? Number(next[next.length - 1].id) : chatLastId
+            if (Number.isFinite(maxId)) setChatLastId(maxId)
+            return next
+          })
+        } catch (_) {}
+      })
+      es.onerror = () => {
+        // Fallback refresh; browser will auto-reconnect
+        if (selectedChatEmail) loadChatMessages(selectedChatEmail)
+      }
+    } catch (_) {
+      // Silent; admin can use manual refresh
+    }
+    return () => {
+      try { esChatRef.current && esChatRef.current.close() } catch (_) {}
+      esChatRef.current = null
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedChatEmail])
 
   // Backup/Restore
   async function createBackup() {
@@ -1131,7 +1182,7 @@ export default function AdminPage() {
           <>
             <div className="h2" style={{ marginTop: 8 }}>Banners</div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <input type="file" ref={fileRef} onChange={e => onUploadBanner(e.target.files?.[0])} />
+              <input type="file" ref={fileRef} accept="image/png,image/jpeg,image/webp,image/gif,image/avif" onChange={e => onUploadBanner(e.target.files?.[0])} />
               <button className="btn" onClick={loadBanners}>Refresh</button>
             </div>
             <div className="card" style={{ marginTop: 8 }}>

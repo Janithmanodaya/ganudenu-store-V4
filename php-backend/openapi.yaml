@@ -812,6 +812,42 @@ paths:
                   ok: { type: boolean }
                   created_at: { type: string, format: date-time }
 
+  /api/chats/stream:
+    get:
+      tags: [SSE]
+      summary: SSE stream for user chat updates
+      parameters:
+        - in: query
+          name: last_id
+          schema: { type: integer }
+      responses:
+        "200":
+          description: text/event-stream with chat_messages events and heartbeats
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
+  /api/chats/admin/{email}/stream:
+    get:
+      tags: [SSE]
+      summary: SSE stream for admin to monitor a user's chat
+      parameters:
+        - in: path
+          name: email
+          required: true
+          schema: { type: string }
+        - in: query
+          name: last_id
+          schema: { type: integer }
+      responses:
+        "200":
+          description: text/event-stream with chat_messages events and heartbeats
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
   /api/wanted/:
     post:
       tags: [Wanted]

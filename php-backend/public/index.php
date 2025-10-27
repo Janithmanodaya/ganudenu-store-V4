@@ -185,6 +185,8 @@ $router->add('POST', '/api/chats/', fn() => \App\Controllers\ChatsController::se
 $router->add('GET', '/api/chats/admin/conversations', fn() => \App\Controllers\ChatsController::adminConversations(), ['rate_group' => 'ADMIN']);
 $router->add('GET', '/api/chats/admin/:email', fn($p) => \App\Controllers\ChatsController::adminFetch($p), ['rate_group' => 'ADMIN']);
 $router->add('POST', '/api/chats/admin/:email', fn($p) => \App\Controllers\ChatsController::adminSend($p), ['rate_group' => 'ADMIN']);
+$router->add('GET', '/api/chats/stream', fn() => \App\Controllers\ChatsController::userStream());
+$router->add('GET', '/api/chats/admin/:email/stream', fn($p) => \App\Controllers\ChatsController::adminStream($p), ['rate_group' => 'ADMIN']);
 
 // Maintenance gate: allow admin, health, maintenance status; else block with 503 and optional HTML
 function is_admin_request(): bool {

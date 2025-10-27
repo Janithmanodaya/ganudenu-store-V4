@@ -12,6 +12,8 @@ export default function ChatWidget() {
   const inputRef = useRef(null);
   const panelRef = useRef(null);
   const [token, setToken] = useState('');
+  const [lastId, setLastId] = useState(0);
+  const esRef = useRef(null);
 
   useEffect(() => {
     try {
@@ -75,7 +77,10 @@ export default function ChatWidget() {
         headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' }
       });
       if (r && r.ok) {
-        setMessages(Array.isArray(data.results) ? data.results : []);
+        const rows = Array.isArray(data.results) ? data.results : [];
+        setMessages(rows);
+        const maxId = rows.length ? Number(rows[rows.length - 1].id) : 0;
+        if (Number.isFinite(maxId)) setLastId(maxId);
         const el = listRef.current;
         if (el) { el.scrollTop = el.scrollHeight; }
         setStatus('');
@@ -88,13 +93,54 @@ export default function ChatWidget() {
     }
   }
 
+  function startSSE() {
+    // EventSource relies on auth_token cookie; ensure user is logged in
+    if (!open || !token) return;
+    try {
+      const url = `/api/chats/stream${lastId ? `?last_id=${encodeURIComponent(lastId)}` : ''}`;
+      const es = new EventSource(url);
+      esRef.current = es;
+      es.addEventListener('chat_messages', (evt) => {
+        try {
+          const payload = JSON.parse(evt.data || '{}');
+          const rows = Array.isArray(payload.results) ? payload.results : [];
+          if (!rows.length) return;
+          setMessages(prev => {
+            // Append new rows, dedupe by id
+            const seen = new Set(prev.map(m => Number(m.id)));
+            const toAdd = rows.filter(r => !seen.has(Number(r.id)));
+            const next = [...prev, ...toAdd];
+            const maxId = next.length ? Number(next[next.length - 1].id) : lastId;
+            if (Number.isFinite(maxId)) setLastId(maxId);
+            // autoscroll
+            const el = listRef.current;
+            if (el) { el.scrollTop = el.scrollHeight; }
+            return next;
+          });
+        } catch (_) {}
+      });
+      es.onerror = () => {
+        // Fallback immediate refresh; browser will auto-reconnect
+        loadMessages();
+      };
+    } catch (_) {
+      // Fall back to polling if EventSource fails to construct (older browsers)
+      const timer = setInterval(loadMessages, 5000);
+      esRef.current = { close: () => clearInterval(timer) };
+    }
+  }
+
+  function stopSSE() {
+    try { esRef.current && esRef.current.close && esRef.current.close(); } catch (_) {}
+    esRef.current = null;
+  }
+
   useEffect(() => {
     if (!open || !token) return;
-    loadMessages();
-    const timer = setInterval(loadMessages, 5000);
-    return () => clearInterval(timer);
+    // Initial load then start SSE
+    loadMessages().then(() => startSSE());
+    return () => stopSSE();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-eps
   }, [open, userEmail]);
 
   async function sendMessage() {
@@ -122,12 +168,12 @@ eps
         return;
       }
       setInput('');
-      // Optimistically append and then refresh from server
+      // Optimistically append; SSE/refresh will confirm
       setMessages(prev => [...prev, { id: Date.now(), sender: 'user', message: msg, created_at: new Date().toISOString() }]);
       const el = listRef.current;
       if (el) { el.scrollTop = el.scrollHeight; }
       setStatus('');
-      // Refresh to reflect any server processing
+      // Refresh last_id baseline so SSE picks up newer admin replies
       loadMessages();
     } catch (e) {
       setStatus('Network error. Please try again.');
