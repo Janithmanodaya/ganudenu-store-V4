@@ -55,7 +55,7 @@ if (is_file($autoload)) {
                 if ($val !== '') {
                     $first = $val[0];
                     $last = $val[strlen($val) - 1] ?? '';
-                    if (($first === '\"' && $last === '\"') || ($first === "'" && $last === "'")) {
+                    if (($first === '"' && $last === '"') || ($first === "'" && $last === "'")) {
                         $val = substr($val, 1, -1);
                     }
                 }
