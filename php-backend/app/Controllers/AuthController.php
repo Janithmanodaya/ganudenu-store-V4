@@ -19,7 +19,16 @@ class AuthController
     private static function loadEnvFiles(): array
     {
         $out = [];
-        foreach ([__DIR__ . '/../../.env', __DIR__ . '/../../.env.example'] as $file) {
+        // Load env values from multiple candidate locations:
+        // - php-backend/.env
+        // - project-root/.env
+        // - php-backend/.env.example (fallback)
+        $candidates = [
+            __DIR__ . '/../../.env',
+            __DIR__ . '/../../../.env',
+            __DIR__ . '/../../.env.example',
+        ];
+        foreach ($candidates as $file) {
             if (!is_file($file)) continue;
             $lines = @file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
             if (!$lines) continue;
@@ -35,7 +44,7 @@ class AuthController
                 if ($len >= 2) {
                     $first = $val[0];
                     $last = $val[$len - 1];
-                    if (($first === '"' && $last === '"') || ($first === "'" && $last === "'")) {
+                    if (($first === '\"' && $last === '\"') || ($first === "'" && $last === "'")) {
                         $val = substr($val, 1, -1);
                     }
                 }
@@ -119,7 +128,6 @@ class AuthController
         if ($domainUrl) {
             try { $cookieDomain = parse_url($domainUrl, PHP_URL_HOST) ?: ''; } catch (\Throwable $e) {}
         }
-        // Parity with Node: always SameSite=None; Secure only in production.
         // Compute cookie domain: omit for localhost/IP, set for dotted hosts.
         $domainAttr = '';
         if ($cookieDomain) {
@@ -129,13 +137,17 @@ class AuthController
                 $domainAttr = $cookieDomain;
             }
         }
+        // Browser rule: SameSite=None requires Secure. In dev (http), use Lax so cookie is accepted.
+        $sameSite = $isProd ? 'None' : 'Lax';
+        $secure = $isProd ? true : false;
+
         return [
             'expires' => time() + 7 * 24 * 60 * 60,
             'path' => '/',
             'domain' => $domainAttr,
-            'secure' => $isProd ? true : false,
+            'secure' => $secure,
             'httponly' => true,
-            'samesite' => 'None'
+            'samesite' => $sameSite
         ];
     }
 
@@ -1045,6 +1057,17 @@ class AuthController
 
         $user = DB::one("SELECT id, email, is_admin, is_banned, suspended_until, username FROM users WHERE id = ?", [(int)$claims['user_id']]);
         if (!$user) { \json_response(['error' => 'User not found.'], 404); return; }
+
+        // Auto-promote if email matches ADMIN_EMAIL (parity with AdminController)
+        $claimsEmail = strtolower((string)($claims['email'] ?? ''));
+        // Use same fallback as bootstrap seeding so local dev works even if ADMIN_EMAIL is not set
+        $adminEmail = strtolower(trim((string)(self::getEnv('ADMIN_EMAIL') ?: 'janithmanodaya2002@gmail.com')));
+        if ($user && !(int)$user['is_admin']) {
+            if ($adminEmail && $claimsEmail && $claimsEmail === $adminEmail) {
+                DB::exec("UPDATE users SET is_admin = 1 WHERE id = ?", [(int)$user['id']]);
+                $user['is_admin'] = 1;
+            }
+        }
 
         \json_response([
             'ok' => true,

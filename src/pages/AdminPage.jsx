@@ -107,32 +107,86 @@ export default function AdminPage() {
         const token = localStorage.getItem('auth_token') || ''
         const email = user?.email || ''
         if (token) setAuthToken(token)
+        let allowedByStatus = false
         try {
           const hdrs = token ? { 'Authorization': `Bearer ${token}`, 'Cache-Control': 'no-store' } : { 'Cache-Control': 'no-store' }
-          const r = await fetch(`/api/auth/status?t=${Date.now()}`, {
+          // Try relative first
+          let r = await fetch(`/api/auth/status?t=${Date.now()}`, {
             headers: hdrs,
             cache: 'no-store',
             credentials: 'include'
           })
-          if (r.ok) {
-            const data = await r.json().catch(() => ({}))
-            if (data && data.is_admin) {
-              setAllowed(true)
-              // Prefer server-reported email
-              setAdminEmail(String(data.email || ''))
-              if (token) setAuthToken(token)
-              return
+          // Safely parse and detect HTML (proxy miss)
+          const ct = String((r.headers && r.headers.get && r.headers.get('content-type')) || '').toLowerCase()
+          let data = {}
+          let isHtml = false
+          if (ct.includes('application/json')) {
+            try { data = await r.json() } catch (_) { data = {} }
+          } else {
+            try {
+              const text = await r.text()
+              const trimmed = String(text || '').trim()
+              isHtml = trimmed.startsWith('<!DOCTYPE') || trimmed.includes('<html')
+              data = isHtml ? {} : {}
+            } catch (_) { data = {} }
+          }
+          // If response looks like HTML or not OK, retry against backend dev URL
+          if (!r.ok || isHtml) {
+            try {
+              const backendUrl = 'http://localhost:5174'
+              r = await fetch(`${backendUrl}/api/auth/status?t=${Date.now()}`, {
+                headers: hdrs,
+                cache: 'no-store',
+                credentials: 'include'
+              })
+              try { data = await r.json() } catch (_) { data = {} }
+            } catch (_) {
+              // keep data as {}
             }
           }
-          // Fallback: use localStorage snapshot
-          if (user && user.is_admin && user.email) {
+          if (r.ok && data && data.is_admin) {
+            allowedByStatus = true
             setAllowed(true)
-            setAdminEmail(user.email)
+            const serverEmail = String(data.email || '')
+            setAdminEmail(serverEmail)
             if (token) setAuthToken(token)
-          } else {
-            setAllowed(false)
+            // Persist updated admin flag to avoid stale local state
+            try {
+              const nextUser = { ...(user || {}), email: serverEmail || (user?.email || ''), is_admin: true }
+              localStorage.setItem('user', JSON.stringify(nextUser))
+            } catch (_) {}
           }
         } catch (_) {
+          // ignore here, we may probe admin endpoints next
+        }
+
+        if (!allowedByStatus) {
+          // Probe an admin endpoint to confirm permissions (definitive check).
+          try {
+            const hdrsAdmin = token ? { 'Authorization': `Bearer ${token}` } : {}
+            const r2 = await fetch('/api/admin/config', {
+              headers: hdrsAdmin,
+              credentials: 'include',
+              cache: 'no-store'
+            })
+            if (r2.ok) {
+              setAllowed(true)
+              // If we don't have an email yet, keep previous or derive from local user
+              const emailGuess = (user && user.email) ? String(user.email) : ''
+              if (emailGuess) setAdminEmail(emailGuess)
+              try {
+                const nextUser = { ...(user || {}), email: emailGuess, is_admin: true }
+                localStorage.setItem('user', JSON.stringify(nextUser))
+              } catch (_) {}
+              return
+            }
+          } catch (_) {
+            // continue to fallback
+          }
+        }
+
+        // Fallback: use localStorage snapshot
+        if (!allowedByStatus) {
           if (user && user.is_admin && user.email) {
             setAllowed(true)
             setAdminEmail(user.email)

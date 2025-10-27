@@ -149,13 +149,17 @@ function set_auth_cookie(string $token): void {
             $domainAttr = $cookieDomain;
         }
     }
+    // Same rule as controllers: SameSite=None requires Secure; in dev use Lax.
+    $sameSite = $isProd ? 'None' : 'Lax';
+    $secure = $isProd ? true : false;
+
     $params = [
         'expires' => time() + 7 * 24 * 60 * 60,
         'path' => '/',
         'domain' => $domainAttr,
-        'secure' => $isProd ? true : false,
+        'secure' => $secure,
         'httponly' => true,
-        'samesite' => 'None'
+        'samesite' => $sameSite
     ];
     // PHP setcookie signature handling
     setcookie('auth_token', $token, $params);
