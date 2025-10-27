@@ -3,7 +3,7 @@ require __DIR__ . '/../app/bootstrap.php';
 
 cors_allow();
 
-// Dev static: serve /uploads/* from ../data/uploads with long cache headers
+// Dev/static: serve /uploads/* from configured UPLOADS_PATH (env) or default to ../../data/uploads with long cache headers
 $pathOnlyStatic = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
 if (preg_match('#^/uploads/(.+)$#', $pathOnlyStatic, $m)) {
     $rel = $m[1];
@@ -13,7 +13,11 @@ if (preg_match('#^/uploads/(.+)$#', $pathOnlyStatic, $m)) {
         echo 'Bad request';
         exit;
     }
-    $file = realpath(__DIR__ . '/../../data/uploads/' . $rel);
+    $uploadsBase = getenv('UPLOADS_PATH');
+    if (!$uploadsBase || !is_dir($uploadsBase)) {
+        $uploadsBase = realpath(__DIR__ . '/../../data/uploads');
+    }
+    $file = $uploadsBase ? realpath(rtrim($uploadsBase, '/\\') . '/' . $rel) : false;
     if ($file && is_file($file)) {
         $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
         $ct = 'application/octet-stream';
@@ -145,7 +149,6 @@ $router->add('POST', '/api/admin/test-gemini', fn() => \App\Controllers\AdminCon
 $router->add('GET', '/api/admin/metrics', fn() => \App\Controllers\AdminController::metrics(), ['rate_group' => 'ADMIN']);
 $router->add('GET', '/api/admin/users', fn() => \App\Controllers\AdminController::usersList(), ['rate_group' => 'ADMIN']);
 $router->add('POST', '/api/admin/users/:id/verify', fn($p) => \App\Controllers\AdminController::userVerify($p), ['rate_group' => 'ADMIN']);
-$router->add('POST', '/api/admin/users/:id/unverify', fn($p) => \App\Controllers\AdminController::userUnverify($p), ['rate_group' => 'ADMIN']);
 $router->add('POST', '/api/admin/users/:id/ban', fn($p) => \App\Controllers\AdminController::userBan($p), ['rate_group' => 'ADMIN']);
 $router->add('POST', '/api/admin/users/:id/unban', fn($p) => \App\Controllers\AdminController::userUnban($p), ['rate_group' => 'ADMIN']);
 $router->add('POST', '/api/admin/users/:id/suspend7', fn($p) => \App\Controllers\AdminController::userSuspend7($p), ['rate_group' => 'ADMIN']);
