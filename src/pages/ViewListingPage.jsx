@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import LoadingOverlay from '../components/LoadingOverlay.jsx'
-import { getSimilarListings, trackView } from '../components/recommendations.js'
+import { trackView } from '../components/recommendations.js'
 import { useI18n } from '../components/i18n.jsx'
 
 export default function ViewListingPage() {
@@ -374,15 +374,20 @@ export default function ViewListingPage() {
     load()
   }, [listingId])
 
-  // Fetch similar listings using the same cookie-based algorithm
+  // Fetch similar listings from PHP backend (server-side recommendation)
   useEffect(() => {
     let alive = true
     async function loadSimilar() {
       try {
         if (!listing) return
         setSimilarLoading(true)
-        const out = await getSimilarListings(listing, 6)
-        if (alive) setSimilar(Array.isArray(out) ? out : [])
+        const params = new URLSearchParams()
+        params.set('id', String(listing.id))
+        params.set('limit', '6')
+        const r = await fetch(`/api/listings/similar?${params.toString()}`)
+        const data = await r.json().catch(() => ({}))
+        const out = Array.isArray(data.results) ? data.results : []
+        if (alive) setSimilar(out)
       } catch (_) {
         if (alive) setSimilar([])
       } finally {
@@ -391,7 +396,7 @@ export default function ViewListingPage() {
     }
     loadSimilar()
     return () => { alive = false }
-  }, [listing, structured?.sub_category, structured?.model_name])
+  }, [listing?.id, structured?.sub_category, structured?.model_name])
 
   // Load favorite status from local storage (client-only favorite)
   useEffect(() => {

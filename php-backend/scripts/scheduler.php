@@ -37,20 +37,67 @@ switch ($task) {
 function purgeExpiredListings(): void
 {
     $now = gmdate('c');
-    $rows = DB::all("SELECT id, thumbnail_path, medium_path, og_image_path FROM listings WHERE valid_until IS NOT NULL AND valid_until <= ?", [$now]);
+    // Load fields needed for cleanup + owner notification/email
+    $rows = DB::all("SELECT id, title, owner_email, thumbnail_path, medium_path, og_image_path FROM listings WHERE valid_until IS NOT NULL AND valid_until <= ?", [$now]);
+    $purged = 0;
     foreach ($rows as $r) {
+        $lid = (int)$r['id'];
+        $ownerEmail = strtolower(trim((string)($r['owner_email'] ?? '')));
+        $title = (string)($r['title'] ?? '');
+
+        // Delete generated top-level image variants
         if (!empty($r['thumbnail_path'])) @unlink($r['thumbnail_path']);
         if (!empty($r['medium_path'])) @unlink($r['medium_path']);
         if (!empty($r['og_image_path'])) @unlink($r['og_image_path']);
-        $imgs = DB::all("SELECT path, medium_path FROM listing_images WHERE listing_id = ?", [$r['id']]);
+
+        // Delete child images from disk and table
+        $imgs = DB::all("SELECT path, medium_path FROM listing_images WHERE listing_id = ?", [$lid]);
         foreach ($imgs as $img) {
             if (!empty($img['path'])) @unlink($img['path']);
             if (!empty($img['medium_path'])) @unlink($img['medium_path']);
         }
-        DB::exec("DELETE FROM listing_images WHERE listing_id = ?", [$r['id']]);
-        DB::exec("UPDATE listings SET status = 'Archived' WHERE id = ?", [$r['id']]);
+        DB::exec("DELETE FROM listing_images WHERE listing_id = ?", [$lid]);
+
+        // Clean up related rows (reports, views, wanted tags, and old notifications referencing listing)
+        DB::exec("DELETE FROM reports WHERE listing_id = ?", [$lid]);
+        DB::exec("DELETE FROM listing_views WHERE listing_id = ?", [$lid]);
+        DB::exec("DELETE FROM listing_wanted_tags WHERE listing_id = ?", [$lid]);
+        DB::exec("DELETE FROM notifications WHERE listing_id = ?", [$lid]); // remove old notifications tied to this listing
+
+        // Notify owner in-app (best-effort) before deleting the listing row
+        if ($ownerEmail) {
+            $meta = json_encode(['reason' => 'expired', 'deleted_at' => gmdate('c')]);
+            $stmt = DB::conn()->prepare("
+              INSERT INTO notifications (title, message, target_email, created_at, type, listing_id, meta_json)
+              VALUES (?, ?, ?, ?, 'listing_deleted', ?, ?)
+            ");
+            $msg = 'Your ad "' . $title . '" (#' . $lid . ') was removed automatically after its validity period.';
+            $stmt->execute(['Your listing expired and was deleted', $msg, $ownerEmail, gmdate('c'), $lid, $meta]);
+            $notifId = (int)DB::lastInsertId();
+
+            // Send email (best-effort)
+            try {
+                $domain = getenv('PUBLIC_DOMAIN') ?: 'https://ganudenu.store';
+                $html = "<div style=\"font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;\">
+                            <h2 style=\"margin:0 0 10px 0;\">Your listing expired and was deleted</h2>
+                            <p style=\"margin:0 0 10px 0;\">We automatically removed your ad <strong>" . htmlspecialchars($title, ENT_QUOTES, 'UTF-8') . "</strong> (#" . $lid . ") after its validity period.</p>
+                            <p style=\"margin:10px 0 0 0;\">You can post it again at <a href=\"" . $domain . "\" style=\"color:#0b5fff;text-decoration:none;\">" . $domain . "</a>.</p>
+                          </div>";
+                $sent = \App\Services\EmailService::send($ownerEmail, 'Your listing expired and was deleted', $html);
+                if (!empty($sent['ok'])) {
+                    DB::exec("UPDATE notifications SET emailed_at = ? WHERE id = ?", [gmdate('c'), $notifId]);
+                }
+            } catch (\Throwable $e) {
+                // ignore email failure
+            }
+        }
+
+        // Finally delete the listing row
+        DB::exec("DELETE FROM listings WHERE id = ?", [$lid]);
+
+        $purged++;
     }
-    echo "Purged " . count($rows) . " expired listings\n";
+    echo "Deleted {$purged} expired listings\n";
 }
 
 function purgeOldChats(): void

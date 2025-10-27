@@ -89,6 +89,119 @@ class ListingsController
         $pdo->exec("CREATE INDEX IF NOT EXISTS idx_listings_owner ON listings(owner_email)");
     }
 
+    // --- Recommendation helpers (server-side parity with client) ---
+
+    private static function tokenize(string $s): array
+    {
+        $t = strtolower(preg_replace('/[^a-z0-9\\s]/', ' ', $s));
+        $parts = preg_split('/\\s+/', $t) ?: [];
+        $stop = ['the','and','for','with','from','this','that','your','you','our','in','on','to','of','a','an','by','at','or','as','is','are','was','were','new','like','very','good','best','great'];
+        $stopSet = array_fill_keys($stop, true);
+        $out = [];
+        foreach ($parts as $w) {
+            if (strlen($w) >= 3 && !isset($stopSet[$w])) $out[$w] = true;
+        }
+        return array_keys($out);
+    }
+
+    private static function parseListingRow(array $listing): array
+    {
+        $sj = json_decode((string)($listing['structured_json'] ?? '{}'), true) ?: [];
+        $main_category = trim((string)($listing['main_category'] ?? ''));
+        $sub_category = trim((string)($sj['sub_category'] ?? ''));
+        $model_name = trim((string)($sj['model_name'] ?? ''));
+        $manufacturer = trim((string)($sj['manufacturer'] ?? ''));
+        if ($manufacturer === '' && $model_name !== '') {
+            $brands = ['honda','yamaha','suzuki','bajaj','tvs','hero','kawasaki','mahindra','royal enfield','vespa','toyota','nissan','mazda','mitsubishi','hyundai','kia','renault','peugeot','ford','isuzu','subaru'];
+            $low = strtolower($model_name);
+            foreach ($brands as $b) { if (preg_match('/\\b' . preg_quote($b, '/') . '\\b/i', $low)) { $manufacturer = implode(' ', array_map(fn($x) => ucfirst($x), explode(' ', $b))); break; } }
+        }
+        $location = trim((string)($listing['location'] ?? ''));
+        $price = isset($listing['price']) ? (float)$listing['price'] : null;
+        $year = isset($sj['manufacture_year']) ? (int)$sj['manufacture_year'] : null;
+        $title = (string)($listing['title'] ?? '');
+        $desc = (string)($listing['seo_description'] ?? ($listing['description'] ?? ''));
+        $tokens = array_values(array_unique(array_merge(self::tokenize($title), self::tokenize($desc), self::tokenize($model_name), self::tokenize($sub_category), self::tokenize($manufacturer))));
+        $urgent = !!($listing['is_urgent'] ?? $listing['urgent'] ?? false);
+        $created_at = !empty($listing['created_at']) ? strtotime((string)$listing['created_at']) * 1000 : null;
+        $views = isset($listing['views']) ? (int)$listing['views'] : 0;
+        return compact('main_category','sub_category','model_name','manufacturer','location','price','year','tokens','urgent','created_at','views');
+    }
+
+    private static function priceBucket($n): ?string
+    {
+        if ($n === null) return null;
+        $v = (float)$n;
+        if (!is_finite($v) || $v <= 0) return null;
+        if ($v <= 100_000) return '0-100k';
+        if ($v <= 500_000) return '100k-500k';
+        if ($v <= 1_000_000) return '500k-1m';
+        if ($v <= 3_000_000) return '1m-3m';
+        return '3m+';
+    }
+
+    private static function scoreListing(array $it, array $context): float
+    {
+        $f = self::parseListingRow($it);
+        $score = 0.0;
+
+        // Keyword affinity against context tokens (base listing title+desc+model+sub+manufacturer)
+        $ctxTokens = $context['tokens'] ?? [];
+        if (!empty($ctxTokens)) {
+            $overlap = 0;
+            $set = array_fill_keys($f['tokens'], true);
+            foreach ($ctxTokens as $t) { if (isset($set[$t])) $overlap++; }
+            $score += $overlap * 1.4;
+        }
+
+        // Category/sub/model/location exact matches
+        if (!empty($context['main_category']) && $f['main_category'] === $context['main_category']) $score += 1.4;
+        if (!empty($context['sub_category']) && $f['sub_category'] === $context['sub_category']) $score += 5.0;
+        if (!empty($context['model_name']) && $f['model_name'] === $context['model_name']) $score += 4.2;
+        if (!empty($context['location']) && strtolower($f['location']) === strtolower((string)$context['location'])) $score += 2.2;
+
+        // Price bucket + closeness
+        $pb = self::priceBucket($f['price']);
+        if (!empty($context['price_bucket']) && $pb === $context['price_bucket']) $score += 1.3;
+        if (isset($context['targetPrice']) && is_finite((float)$context['targetPrice']) && is_finite((float)$f['price'])) {
+            $tp = (float)$context['targetPrice'];
+            $diff = abs($f['price'] - $tp);
+            $rel = $tp > 0 ? max(0.0, 1.0 - ($diff / $tp)) : 0.0;
+            $score += $rel * 3.0;
+        }
+
+        // Year closeness
+        if (isset($context['targetYear']) && is_finite((float)$context['targetYear']) && is_finite((float)$f['year'])) {
+            $dy = abs(((int)$context['targetYear']) - ((int)$f['year']));
+            $yscore = max(0.0, 1.0 - min(1.0, $dy / 5.0));
+            $score += $yscore * 2.0;
+        }
+
+        // Recency boost (half-life ~14 days)
+        if (!empty($f['created_at'])) {
+            $days = max(0.0, ((microtime(true) * 1000) - $f['created_at']) / 86_400_000.0);
+            $recency = max(0.0, 1.0 - min(1.0, $days / 14.0));
+            $score += $recency * 5.0;
+        }
+
+        // Urgent boost
+        if ($f['urgent']) $score += 3.2;
+
+        // Trending views boost
+        if (is_finite((float)$f['views']) && $f['views'] > 0) {
+            $v = log10(1.0 + max(0.0, (float)$f['views']));
+            $score += $v * 2.0;
+        }
+
+        // Slight preference for lower price
+        if (is_finite((float)$f['price'])) {
+            $pr = log10(max(1.0, (float)$f['price']));
+            $score += max(0.0, 5.0 - $pr) * 0.35;
+        }
+
+        return (float)$score;
+    }
+
     public static function list(): void
     {
         self::ensureSchema();
@@ -722,28 +835,83 @@ class ListingsController
         $ts = gmdate('c');
         $validUntil = gmdate('c', time() + ((int)$draft['employee_profile'] === 1 ? 90 : 30) * 24 * 3600);
 
-        // Generate thumbnail (best-effort) from first image
+        // Generate thumbnail (best-effort) from first image, with Imagick or GD fallback
         $thumbPath = null;
-        $mediumPath = null;
+        $mediumPath = null; // deprecated single-medium field (kept null)
         $ogPath = null;
         try {
             $firstImg = $images[0]['path'] ?? null;
-            if ($firstImg && class_exists('Imagick')) {
-                $img = new \Imagick($firstImg);
-                $img->resizeImage(120, 90, \Imagick::FILTER_LANCZOS, 1, true);
-                $thumbPath = dirname($firstImg) . '/' . pathinfo($firstImg, PATHINFO_FILENAME) . '-thumb.webp';
-                $img->setImageFormat('webp');
-                $img->writeImage($thumbPath);
-                $img->clear(); $img->destroy();
-                // OG image simplified
-                $img2 = new \Imagick($firstImg);
-                $img2->resizeImage(1200, 630, \Imagick::FILTER_LANCZOS, 1, true);
-                $ogPath = dirname($firstImg) . '/' . pathinfo($firstImg, PATHINFO_FILENAME) . '-og.webp';
-                $img2->setImageFormat('webp');
-                $img2->writeImage($ogPath);
-                $img2->clear(); $img2->destroy();
+            if ($firstImg) {
+                $baseDir = dirname($firstImg);
+                $baseName = pathinfo($firstImg, PATHINFO_FILENAME);
+                $thumbPath = $baseDir . '/' . $baseName . '-thumb.webp';
+                $ogPath = $baseDir . '/' . $baseName . '-og.webp';
+
+                if (class_exists('Imagick')) {
+                    // Thumbnail 120x90 (aspect fit with letterbox to avoid distortion)
+                    $im = new \Imagick($firstImg);
+                    $im->setImageFormat('webp');
+                    $im->thumbnailImage(120, 90, true, true);
+                    $im->writeImage($thumbPath);
+                    $im->clear(); $im->destroy();
+
+                    // OG image 1200x630
+                    $im2 = new \Imagick($firstImg);
+                    $im2->setImageFormat('webp');
+                    $im2->resizeImage(1200, 630, \Imagick::FILTER_LANCZOS, 1, true);
+                    $im2->writeImage($ogPath);
+                    $im2->clear(); $im2->destroy();
+                } else {
+                    // GD fallback
+                    $src = null;
+                    $mime = mime_content_type($firstImg) ?: '';
+                    if (str_contains(strtolower($mime), 'png')) $src = @imagecreatefrompng($firstImg);
+                    elseif (str_contains(strtolower($mime), 'webp')) $src = @imagecreatefromwebp($firstImg);
+                    elseif (str_contains(strtolower($mime), 'gif')) $src = @imagecreatefromgif($firstImg);
+                    else $src = @imagecreatefromjpeg($firstImg);
+
+                    if ($src !== false) {
+                        $sw = imagesx($src); $sh = imagesy($src);
+
+                        // Create letterboxed thumbnail canvas 120x90
+                        $tw = 120; $th = 90;
+                        $thumbCanvas = imagecreatetruecolor($tw, $th);
+                        $bg = imagecolorallocate($thumbCanvas, 0, 0, 0);
+                        imagefill($thumbCanvas, 0, 0, $bg);
+                        $scale = min($tw / max(1, $sw), $th / max(1, $sh));
+                        $nw = max(1, (int)round($sw * $scale));
+                        $nh = max(1, (int)round($sh * $scale));
+                        $ox = (int)floor(($tw - $nw) / 2);
+                        $oy = (int)floor(($th - $nh) / 2);
+                        imagecopyresampled($thumbCanvas, $src, $ox, $oy, 0, 0, $nw, $nh, $sw, $sh);
+                        @imagewebp($thumbCanvas, $thumbPath, 80);
+                        imagedestroy($thumbCanvas);
+
+                        // OG image: fit to 1200x630 letterboxed
+                        $ow = 1200; $oh = 630;
+                        $ogCanvas = imagecreatetruecolor($ow, $oh);
+                        $bg2 = imagecolorallocate($ogCanvas, 0, 0, 0);
+                        imagefill($ogCanvas, 0, 0, $bg2);
+                        $scale2 = min($ow / max(1, $sw), $oh / max(1, $sh));
+                        $nw2 = max(1, (int)round($sw * $scale2));
+                        $nh2 = max(1, (int)round($sh * $scale2));
+                        $ox2 = (int)floor(($ow - $nw2) / 2);
+                        $oy2 = (int)floor(($oh - $nh2) / 2);
+                        imagecopyresampled($ogCanvas, $src, $ox2, $oy2, 0, 0, $nw2, $nh2, $sw, $sh);
+                        @imagewebp($ogCanvas, $ogPath, 90);
+                        imagedestroy($ogCanvas);
+
+                        imagedestroy($src);
+                    } else {
+                        // Fallback: no GD support for this image, clear paths
+                        $thumbPath = null;
+                        $ogPath = null;
+                    }
+                }
             }
-        } catch (\Throwable $e) {}
+        } catch (\Throwable $e) {
+            // Leave paths null on failure
+        }
 
         // remark number
         $remark = (string) random_int(1000, 9999);
@@ -769,7 +937,49 @@ class ListingsController
         $listingId = DB::lastInsertId();
 
         foreach ($images as $img) {
-            DB::exec("INSERT INTO listing_images (listing_id, path, original_name, medium_path) VALUES (?, ?, ?, ?)", [$listingId, $img['path'], $img['original_name'], null]);
+            // Create per-image medium variant (~1024px width) for faster cards on home/search pages
+            $eachMedium = null;
+            try {
+                $srcPath = (string)($img['path'] ?? '');
+                if ($srcPath !== '') {
+                    $outDir = dirname($srcPath);
+                    $baseName = pathinfo($srcPath, PATHINFO_FILENAME);
+                    $eachMedium = $outDir . '/' . $baseName . '-m1024.webp';
+
+                    if (class_exists('Imagick')) {
+                        $im = new \Imagick($srcPath);
+                        $im->setImageFormat('webp');
+                        $im->resizeImage(1024, 0, \Imagick::FILTER_LANCZOS, 1, true);
+                        $im->writeImage($eachMedium);
+                        $im->clear(); $im->destroy();
+                    } else {
+                        // GD fallback
+                        $src = null;
+                        $mime = mime_content_type($srcPath) ?: '';
+                        if (str_contains(strtolower($mime), 'png')) $src = @imagecreatefrompng($srcPath);
+                        elseif (str_contains(strtolower($mime), 'webp')) $src = @imagecreatefromwebp($srcPath);
+                        elseif (str_contains(strtolower($mime), 'gif')) $src = @imagecreatefromgif($srcPath);
+                        else $src = @imagecreatefromjpeg($srcPath);
+
+                        if ($src !== false) {
+                            $sw = imagesx($src); $sh = imagesy($src);
+                            $newW = min(1024, $sw);
+                            $newH = (int) round($sh * ($newW / max(1, $sw)));
+                            $dst = imagecreatetruecolor($newW, $newH);
+                            imagecopyresampled($dst, $src, 0, 0, 0, 0, $newW, $newH, $sw, $sh);
+                            @imagewebp($dst, $eachMedium, 84);
+                            imagedestroy($dst);
+                            imagedestroy($src);
+                        } else {
+                            $eachMedium = null;
+                        }
+                    }
+                }
+            } catch (\Throwable $e) {
+                $eachMedium = null;
+            }
+
+            DB::exec("INSERT INTO listing_images (listing_id, path, original_name, medium_path) VALUES (?, ?, ?, ?)", [$listingId, $img['path'], $img['original_name'], $eachMedium]);
         }
 
         // Link wanted tags -> listing (best-effort)

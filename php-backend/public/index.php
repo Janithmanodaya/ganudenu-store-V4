@@ -110,6 +110,7 @@ $router->add('GET', '/api/listings/', fn() => \App\Controllers\ListingsControlle
 $router->add('GET', '/api/listings/search', fn() => \App\Controllers\ListingsController::search(), ['rate_group' => 'LISTINGS']);
 $router->add('GET', '/api/listings/filters', fn() => \App\Controllers\ListingsController::filters(), ['rate_group' => 'LISTINGS']);
 $router->add('GET', '/api/listings/suggestions', fn() => \App\Controllers\ListingsController::suggestions(), ['rate_group' => 'LISTINGS']);
+$router->add('GET', '/api/listings/similar', fn() => \App\Controllers\ListingsController::similar([]), ['rate_group' => 'LISTINGS']);
 $router->add('GET', '/api/listings/my', fn() => \App\Controllers\ListingsController::my(), ['rate_group' => 'LISTINGS']);
 $router->add('GET', '/api/listings/my-drafts', fn() => \App\Controllers\ListingsController::myDrafts(), ['rate_group' => 'LISTINGS']);
 $router->add('GET', '/api/listings/:id', fn($p) => \App\Controllers\ListingsController::get($p), ['rate_group' => 'LISTINGS']);
