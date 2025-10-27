@@ -191,6 +191,21 @@ function writeApiEnv() {
   fs.writeFileSync(path.join(API_OUT, '.env'), env, 'utf8');
 }
 
+function fixApiIndexRequire() {
+  const idx = path.join(API_OUT, 'index.php');
+  if (!fs.existsSync(idx)) return;
+  let src = fs.readFileSync(idx, 'utf8');
+  // Adjust require path from ../app/bootstrap.php (original path under public/)
+  // to ./app/bootstrap.php (since app/ is inside api/)
+  const before = "/../app/bootstrap.php";
+  const after = "/app/bootstrap.php";
+  if (src.includes(before)) {
+    src = src.replace(before, after);
+    fs.writeFileSync(idx, src, 'utf8');
+    log('Patched api/index.php require path to /app/bootstrap.php');
+  }
+}
+
 function main() {
   log('Preparing host-friendly deploy for ganudenu.store');
   ensureBuilt();
@@ -199,6 +214,7 @@ function main() {
   writeRootHtaccess();
   copyPhpBackend();
   writeApiHtaccess();
+  fixApiIndexRequire();
   writeApiEnv();
 
   log('Done. Upload the contents of host-deploy/ to your hosting public_html.');
