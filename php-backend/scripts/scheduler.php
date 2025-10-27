@@ -38,19 +38,35 @@ function purgeExpiredListings(): void
 {
     $now = gmdate('c');
     $rows = DB::all("SELECT id, thumbnail_path, medium_path, og_image_path FROM listings WHERE valid_until IS NOT NULL AND valid_until <= ?", [$now]);
+    $purged = 0;
     foreach ($rows as $r) {
+        $lid = (int)$r['id'];
+
+        // Delete generated top-level image variants
         if (!empty($r['thumbnail_path'])) @unlink($r['thumbnail_path']);
         if (!empty($r['medium_path'])) @unlink($r['medium_path']);
         if (!empty($r['og_image_path'])) @unlink($r['og_image_path']);
-        $imgs = DB::all("SELECT path, medium_path FROM listing_images WHERE listing_id = ?", [$r['id']]);
+
+        // Delete child images from disk and table
+        $imgs = DB::all("SELECT path, medium_path FROM listing_images WHERE listing_id = ?", [$lid]);
         foreach ($imgs as $img) {
             if (!empty($img['path'])) @unlink($img['path']);
             if (!empty($img['medium_path'])) @unlink($img['medium_path']);
         }
-        DB::exec("DELETE FROM listing_images WHERE listing_id = ?", [$r['id']]);
-        DB::exec("UPDATE listings SET status = 'Archived' WHERE id = ?", [$r['id']]);
+        DB::exec("DELETE FROM listing_images WHERE listing_id = ?", [$lid]);
+
+        // Clean up related rows (reports, views, wanted tags, notifications referencing listing)
+        DB::exec("DELETE FROM reports WHERE listing_id = ?", [$lid]);
+        DB::exec("DELETE FROM listing_views WHERE listing_id = ?", [$lid]);
+        DB::exec("DELETE FROM listing_wanted_tags WHERE listing_id = ?", [$lid]);
+        DB::exec("DELETE FROM notifications WHERE listing_id = ?", [$lid]);
+
+        // Finally delete the listing row
+        DB::exec("DELETE FROM listings WHERE id = ?", [$lid]);
+
+        $purged++;
     }
-    echo "Purged " . count($rows) . " expired listings\n";
+    echo "Deleted {$purged} expired listings\n";
 }
 
 function purgeOldChats(): void
@@ -62,12 +78,19 @@ function purgeOldChats(): void
 
 function purgeOldWantedRequests(): void
 {
-    $cutoff = gmdate('c', time() - 90 * 24 * 3600);
-    $rows = DB::all("SELECT id FROM wanted_requests WHERE status = 'open' AND created_at < ?", [$cutoff]);
+    // Delete Wanted requests older than 10 days (regardless of status), including related notifications
+    $cutoff = gmdate('c', time() - 10 * 24 * 3600);
+    $rows = DB::all("SELECT id FROM wanted_requests WHERE created_at < ?", [$cutoff]);
+    $deleted = 0;
     foreach ($rows as $r) {
-        DB::exec("UPDATE wanted_requests SET status = 'closed' WHERE id = ?", [$r['id']]);
+        $wid = (int)$r['id'];
+        // Remove notifications linking to this wanted request (stored in meta_json)
+        DB::exec("DELETE FROM notifications WHERE meta_json LIKE ?", ['%\"wanted_id\":' . $wid . '%']);
+        // Delete the request itself
+        DB::exec("DELETE FROM wanted_requests WHERE id = ?", [$wid]);
+        $deleted++;
     }
-    echo "Closed " . count($rows) . " old wanted requests\n";
+    echo "Deleted {$deleted} wanted requests older than 10 days\n";
 }
 
 function sendSavedSearchEmailDigests(): void
