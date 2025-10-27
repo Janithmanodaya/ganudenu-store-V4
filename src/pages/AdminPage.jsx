@@ -920,10 +920,10 @@ export default function AdminPage() {
 
   if (loading) {
     return (
-     < div className="center">
-       < div className="card">
-         < div className="h1">Admin Dashboa</d<div>
-         < p className="text-muted">Checkingdenied. Admins only.</p>
+      <div className="center">
+        <div className="card">
+          <div className="h1">Admin Dashboard</div>
+          <p className="text-muted">Checking access… Admins only.</p>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="btn primary" onClick={() => navigate('/auth')}>Go to Login</button>
             <button className="btn" onClick={() => navigate('/')}>Home</button>
@@ -1523,47 +1523,6 @@ export default function AdminPage() {
                 <div className="h2">Edit Listing #{selectedId}</div>
                 <div className="text-muted">Category: {detail.listing.main_category}</div>
                 <div className="text-muted">Title: {detail.listing.title}</div>
-                <div className="text-muted" style={{ marginTop: 4 }}>
-                  <span title="Owner email">Owner: {detail.listing.owner_email || 'Unknown'}</span>
-                  {detail.listing.remark_number ? <> • Remark: <strong>{detail.listing.remark_number}</strong></> : null}
-                </div>
-
-                {/* Description preview */}
-                {detail.listing.description && (
-                  <div className="card" style={{ marginTop: 8 }}>
-                    <div className="h2" style={{ marginTop: 0 }}>Description</div>
-                    <div className="text-muted" style={{ whiteSpace: 'pre-wrap' }}>
-                      {detail.listing.description}
-                    </div>
-                  </div>
-                )}
-
-                {/* Images preview */}
-                {Array.isArray(detail.images) && detail.images.length > 0 && (
-                  <div className="card" style={{ marginTop: 8 }}>
-                    <div className="h2" style={{ marginTop: 0 }}>Images</div>
-                    <div className="grid five" style={{ gap: 10 }}>
-                      {detail.images.map(im => {
-                        const filename = String(im.path || '').split(/[\\\/]/).pop()
-                        const url = filename ? `/uploads/${filename}` : ''
-                        return (
-                          <div key={im.id || url} className="card" style={{ padding: 0, height: 120, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                            {url ? (
-                              <img
-                                src={url}
-                                alt={im.original_name || 'image'}
-                                style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 12 }}
-                              />
-                            ) : (
-                              <div className="text-muted">No image</div>
-                            )}
-                          </div>
-                        )
-                      })}
-                    </div>
-                  </div>
-                )}
-
                 <div style={{ marginTop: 8 }}>
                   <label className="text-muted">Structured JSON</label>
                   <textarea className="textarea" value={editStructured} onChange={e => setEditStructured(e.target.value)} />
