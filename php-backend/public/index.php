@@ -79,6 +79,9 @@ $router->add('POST', '/api/auth/verify-password-otp', fn() => \App\Controllers\A
 $router->add('POST', '/api/auth/reset-password', fn() => \App\Controllers\AuthController::resetPassword(), ['rate_group' => 'AUTH']);
 $router->add('GET', '/api/auth/status', fn() => \App\Controllers\AuthController::status(), ['rate_group' => 'GLOBAL']);
 
+// Jobs (Employee Profile)
+$router->add('POST', '/api/jobs/employee/draft', fn() => \App\Controllers\JobsController::employeeDraft(), ['rate_group' => 'LISTINGS']);
+
 // Notifications
 $router->add('GET', '/api/notifications/', fn() => \App\Controllers\NotificationsController::list(), ['rate_group' => 'GLOBAL']);
 $router->add('GET', '/api/notifications/unread-count', fn() => \App\Controllers\NotificationsController::unreadCount(), ['rate_group' => 'GLOBAL']);
@@ -145,6 +148,21 @@ $router->add('POST', '/api/admin/users/:id/suspend', fn($p) => \App\Controllers\
 $router->add('POST', '/api/admin/users/:id/unsuspend', fn($p) => \App\Controllers\AdminController::userUnsuspend($p), ['rate_group' => 'ADMIN']);
 $router->add('POST', '/api/admin/backup', fn() => \App\Controllers\AdminController::backup(), ['rate_group' => 'ADMIN']);
 $router->add('POST', '/api/admin/restore', fn() => \App\Controllers\AdminController::restore(), ['rate_group' => 'ADMIN']);
+
+// Admin notifications
+$router->add('GET', '/api/admin/notifications', fn() => \App\Controllers\AdminController::notificationsList(), ['rate_group' => 'ADMIN']);
+$router->add('POST', '/api/admin/notifications', fn() => \App\Controllers\AdminController::notificationsCreate(), ['rate_group' => 'ADMIN']);
+$router->add('DELETE', '/api/admin/notifications/:id', fn($p) => \App\Controllers\AdminController::notificationsDelete($p), ['rate_group' => 'ADMIN']);
+
+// Admin reports
+$router->add('GET', '/api/admin/reports', fn() => \App\Controllers\AdminController::reportsList(), ['rate_group' => 'ADMIN']);
+$router->add('POST', '/api/admin/reports/:id/resolve', fn($p) => \App\Controllers\AdminController::reportResolve($p), ['rate_group' => 'ADMIN']);
+$router->add('DELETE', '/api/admin/reports/:id', fn($p) => \App\Controllers\AdminController::reportDelete($p), ['rate_group' => 'ADMIN']);
+
+// Admin listing management
+$router->add('GET', '/api/admin/users/:id/listings', fn($p) => \App\Controllers\AdminController::userListings($p), ['rate_group' => 'ADMIN']);
+$router->add('POST', '/api/admin/listings/:id/urgent', fn($p) => \App\Controllers\AdminController::listingUrgent($p), ['rate_group' => 'ADMIN']);
+$router->add('DELETE', '/api/admin/listings/:id', fn($p) => \App\Controllers\AdminController::listingDelete($p), ['rate_group' => 'ADMIN']);
 
 // Wanted
 $router->add('POST', '/api/wanted/', fn() => \App\Controllers\WantedController::create(), ['rate_group' => 'GLOBAL']);

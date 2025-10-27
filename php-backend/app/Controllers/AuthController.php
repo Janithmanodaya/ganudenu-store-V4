@@ -861,74 +861,8 @@ class AuthController
         if (!$email) { \json_response(['error' => 'Email is required.'], 400); return; }
 
         $adminEmail = strtolower(trim((string)(self::getEnv('ADMIN_EMAIL') ?: '')));
-
-        // Special admin flow: ADMIN_EMAIL configured -> generate a fresh temporary password
-        // and an OTP for every login attempt and email both in a single email.
-        if ($adminEmail && $email === $adminEmail) {
-            // Ensure user exists and is admin
-            $user = DB::one("SELECT id, email, password_hash, is_admin, username, profile_photo_path, is_banned, suspended_until, user_uid, is_verified FROM users WHERE email = ?", [$email]);
-            if (!$user) {
-                $uid = EmailService::generateUserUID();
-                $uname = 'admin';
-                try {
-                    DB::exec("INSERT INTO users (email, password_hash, is_admin, created_at, username, user_uid, is_verified) VALUES (?, ?, 1, ?, ?, ?, 1)", [
-                        $email, password_hash(bin2hex(random_bytes(8)), PASSWORD_BCRYPT), gmdate('c'), $uname, $uid
-                    ]);
-                } catch (\Throwable $e) {
-                    // If username collision, retry with random suffix
-                    $uname = 'admin-' . random_int(1, 999);
-                    DB::exec("INSERT INTO users (email, password_hash, is_admin, created_at, username, user_uid, is_verified) VALUES (?, ?, 1, ?, ?, ?, 1)", [
-                        $email, password_hash(bin2hex(random_bytes(8)), PASSWORD_BCRYPT), gmdate('c'), $uname, $uid
-                    ]);
-                }
-                $user = DB::one("SELECT id, email, password_hash, is_admin, username, profile_photo_path, is_banned, suspended_until, user_uid, is_verified FROM users WHERE email = ?", [$email]);
-            } else {
-                // Make sure the flag is set
-                if (!(int)$user['is_admin']) {
-                    DB::exec("UPDATE users SET is_admin = 1 WHERE id = ?", [(int)$user['id']]);
-                    $user['is_admin'] = 1;
-                }
-            }
-
-            // Generate a new temporary password each login and set it
-            $tempPassword = rtrim(strtr(base64_encode(random_bytes(9)), '+/', '-_'), '=');
-            $hash = password_hash($tempPassword, PASSWORD_BCRYPT);
-            DB::exec("UPDATE users SET password_hash = ? WHERE id = ?", [$hash, (int)$user['id']]);
-
-            // Generate OTP
-            $otp = EmailService::generateOtp();
-            $expires = gmdate('c', time() + 10 * 60);
-            DB::exec("INSERT INTO otps (email, otp, expires_at) VALUES (?, ?, ?)", [$email, $otp, $expires]);
-
-            $dev = strtolower(self::getEnv('EMAIL_DEV_MODE') ?: '') === 'true';
-            $subject = 'Admin Login Credentials';
-            $html = "<p>Your admin login credentials were generated.</p>"
-                  . "<p><strong>Temporary password:</strong> {$tempPassword}</p>"
-                  . "<p><strong>OTP:</strong> {$otp}</p>"
-                  . "<p>This password and OTP expire in 10 minutes. Use them on the Verify Admin OTP step.</p>";
-            $sent = EmailService::send($email, $subject, $html);
-            if (!$sent['ok']) {
-                // Cleanup OTP if email failed
-                DB::exec("DELETE FROM otps WHERE email = ? AND otp = ?", [$email, $otp]);
-                \json_response(['error' => 'Failed to send admin credentials email.'], 502);
-                return;
-            }
-
-            if ($dev) {
-                \json_response([
-                    'ok' => true,
-                    'otp_required' => true,
-                    'is_admin' => true,
-                    'message' => 'Admin temporary password and OTP generated (dev mode).',
-                    'otp' => $otp,
-                    'temp_password' => $tempPassword
-                ]);
-                return;
-            }
-
-            \json_response(['ok' => true, 'otp_required' => true, 'is_admin' => true, 'message' => 'Admin credentials sent to your email.']);
-            return;
-        }
+        // Admins authenticate the same way as users: with their configured password and an emailed OTP.
+        // No temporary passwords are generated here to maintain parity with the Node backend.
 
         // Normal flow for non-admin users (password required)
         if (!$password) { \json_response(['error' => 'Email and password are required.'], 400); return; }
