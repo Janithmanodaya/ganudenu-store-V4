@@ -482,28 +482,312 @@ class AdminController
     public static function testGemini(): void
     {
         $admin = self::requireAdmin(); if (!$admin) return;
-        try {
-            $title = (string)($_POST['title'] ?? ($_GET['title'] ?? ''));
-            $description = (string)($_POST['description'] ?? ($_GET['description'] ?? ''));
-            $cat = \App\Services\GeminiService::classifyMainCategory($title, $description);
-            $struct = \App\Services\GeminiService::extractStructured($cat, $title, $description);
-            \json_response(['ok' => true, 'category' => $cat, 'structured' => $struct]);
-        } catch (\Throwable $e) {
-            \json_response(['error' => 'Gemini call failed'], 500);
+        $key = getenv('GEMINI_API_KEY') ?: '';
+        if (!$key) { \json_response(['error' => 'No Gemini API key configured.'], 400); return; }
+        $url = 'https://generativelanguage.googleapis.com/v1/models?key=' . urlencode($key);
+        $ctx = stream_context_create([
+            'http' => [
+                'method' => 'GET',
+                'timeout' => 15,
+                'ignore_errors' => true,
+                'header' => "Accept: application/json\r\nUser-Agent: ganudenu-php-backend\r\n",
+            ],
+            'ssl' => [
+                'verify_peer' => true,
+                'verify_peer_name' => true,
+            ]
+        ]);
+        $resp = @file_get_contents($url, false, $ctx);
+        $status = 0;
+        if (isset($http_response_header) && is_array($http_response_header)) {
+            foreach ($http_response_header as $h) {
+                if (preg_match('#^HTTP/\d(?:\.\d)?\s+(\d{3})#', $h, $m)) { $status = (int)$m[1]; break; }
+            }
+        }
+        $data = json_decode((string)$resp, true) ?: [];
+        if ($status >= 200 && $status < 300) {
+            $count = is_array($data['models'] ?? null) ? count($data['models']) : 0;
+            \json_response(['ok' => true, 'models_count' => $count]);
+        } else {
+            \json_response(['ok' => false, 'error' => $data['error'] ?? $data], $status > 0 ? $status : 500);
         }
     }
 
     public static function metrics(): void
     {
         $admin = self::requireAdmin(); if (!$admin) return;
-        $totals = [
-            'users' => (int)(DB::one("SELECT COUNT(*) AS c FROM users")['c'] ?? 0),
-            'listings' => (int)(DB::one("SELECT COUNT(*) AS c FROM listings")['c'] ?? 0),
-            'approved' => (int)(DB::one("SELECT COUNT(*) AS c FROM listings WHERE status = 'Approved'")['c'] ?? 0),
-            'pending' => (int)(DB::one("SELECT COUNT(*) AS c FROM listings WHERE status = 'Pending Approval'")['c'] ?? 0),
-            'rejected' => (int)(DB::one("SELECT COUNT(*) AS c FROM listings WHERE status = 'Rejected'")['c'] ?? 0),
-        ];
-        \json_response($totals);
+        try {
+            $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+            $nowIso = $now->format('c');
+
+            // Range param: days (default 14, max 60)
+            $daysParam = (int)($_GET['days'] ?? 14);
+            if ($daysParam <= 0) $daysParam = 14;
+            if ($daysParam > 60) $daysParam = 60;
+
+            $rangeStart = (clone $now)->setTime(0, 0, 0);
+            $rangeStart = $rangeStart->sub(new \DateInterval('P' . ($daysParam - 1) . 'D'));
+            $rangeStartIso = $rangeStart->format('c');
+
+            // Totals
+            $totalUsers = (int)(DB::one("SELECT COUNT(*) AS c FROM users")['c'] ?? 0);
+            $bannedUsers = (int)(DB::one("SELECT COUNT(*) AS c FROM users WHERE is_banned = 1")['c'] ?? 0);
+            $suspendedUsers = (int)(DB::one("SELECT COUNT(*) AS c FROM users WHERE suspended_until IS NOT NULL AND suspended_until > ?", [$nowIso])['c'] ?? 0);
+
+            $totalListings = (int)(DB::one("SELECT COUNT(*) AS c FROM listings")['c'] ?? 0);
+            $activeListings = (int)(DB::one("SELECT COUNT(*) AS c FROM listings WHERE status IN ('Approved','Active')")['c'] ?? 0);
+            $pendingListings = (int)(DB::one("SELECT COUNT(*) AS c FROM listings WHERE status = 'Pending Approval'")['c'] ?? 0);
+            $rejectedListings = (int)(DB::one("SELECT COUNT(*) AS c FROM listings WHERE status = 'Rejected'")['c'] ?? 0);
+
+            // Reports (handle schema without status)
+            $hasStatus = false;
+            try {
+                $cols = DB::all("PRAGMA table_info(reports)");
+                foreach ($cols as $c) { if (strtolower((string)$c['name']) === 'status') { $hasStatus = true; break; } }
+            } catch (\Throwable $e) {}
+            if ($hasStatus) {
+                $reportPending = (int)(DB::one("SELECT COUNT(*) AS c FROM reports WHERE status = 'pending'")['c'] ?? 0);
+                $reportResolved = (int)(DB::one("SELECT COUNT(*) AS c FROM reports WHERE status = 'resolved'")['c'] ?? 0);
+            } else {
+                $allReports = (int)(DB::one("SELECT COUNT(*) AS c FROM reports")['c'] ?? 0);
+                $reportPending = $allReports;
+                $reportResolved = 0;
+            }
+
+            // Visitors
+            $visitorsTotal = 0;
+            $visitorsInRange = 0;
+            try {
+                $visitorsTotal = (int)(DB::one("SELECT COUNT(DISTINCT ip) AS c FROM listing_views WHERE ip IS NOT NULL AND TRIM(ip) <> ''")['c'] ?? 0);
+                $visitorsInRange = (int)(DB::one("SELECT COUNT(DISTINCT ip) AS c FROM listing_views WHERE ts >= ? AND ip IS NOT NULL AND TRIM(ip) <> ''", [$rangeStartIso])['c'] ?? 0);
+            } catch (\Throwable $e) {}
+
+            // Filesystem stats
+            $base = realpath(__DIR__ . '/../../..') ?: (__DIR__ . '/../../..');
+            $dataDir = $base . '/data';
+            $uploadsDir = $dataDir . '/uploads';
+
+            $safeStat = function (string $p) {
+                try { return @stat($p); } catch (\Throwable $e) { return null; }
+            };
+            $countFilesRec = function (string $dir, array $opts = []) use (&$countFilesRec, $safeStat) {
+                $st = $safeStat($dir);
+                if (!$st || !is_dir($dir)) return 0;
+                $count = 0;
+                $skip = isset($opts['skip']) && is_array($opts['skip']) ? array_flip($opts['skip']) : [];
+                $filterExt = isset($opts['filterExt']) && is_array($opts['filterExt']) ? array_flip(array_map('strtolower', $opts['filterExt'])) : null;
+                $dh = @opendir($dir);
+                if (!$dh) return 0;
+                while (($entry = readdir($dh)) !== false) {
+                    if ($entry === '.' || $entry === '..') continue;
+                    if (isset($skip[$entry])) continue;
+                    $p = $dir . '/' . $entry;
+                    $s = $safeStat($p);
+                    if (!$s) continue;
+                    if (is_dir($p)) {
+                        $count += $countFilesRec($p, $opts);
+                    } elseif (is_file($p)) {
+                        if ($filterExt) {
+                            $ext = strtolower(pathinfo($entry, PATHINFO_EXTENSION));
+                            if (!isset($filterExt[$ext])) continue;
+                        }
+                        $count++;
+                    }
+                }
+                @closedir($dh);
+                return $count;
+            };
+            $listFilesRec = function (string $dir, array $opts = []) use (&$listFilesRec, $safeStat) {
+                $out = [];
+                $st = $safeStat($dir);
+                if (!$st || !is_dir($dir)) return $out;
+                $skip = isset($opts['skip']) && is_array($opts['skip']) ? array_flip($opts['skip']) : [];
+                $filterExt = isset($opts['filterExt']) && is_array($opts['filterExt']) ? array_flip(array_map('strtolower', $opts['filterExt'])) : null;
+                $dh = @opendir($dir);
+                if (!$dh) return $out;
+                while (($entry = readdir($dh)) !== false) {
+                    if ($entry === '.' || $entry === '..') continue;
+                    if (isset($skip[$entry])) continue;
+                    $p = $dir . '/' . $entry;
+                    $s = $safeStat($p);
+                    if (!$s) continue;
+                    if (is_dir($p)) {
+                        $out = array_merge($out, $listFilesRec($p, $opts));
+                    } elseif (is_file($p)) {
+                        if ($filterExt) {
+                            $ext = strtolower(pathinfo($entry, PATHINFO_EXTENSION));
+                            if (!isset($filterExt[$ext])) continue;
+                        }
+                        $out[] = ['path' => $p, 'size' => $s['size'] ?? 0, 'mtime' => isset($s['mtime']) ? (int)$s['mtime'] : null];
+                    }
+                }
+                @closedir($dh);
+                return $out;
+            };
+
+            $imageEntries = [];
+            $imagesCount = 0;
+            $uploadsDiskUsageBytes = 0;
+            try {
+                $exts = ['webp','jpg','jpeg','png','gif','avif','tiff'];
+                $imageEntries = $listFilesRec($uploadsDir, ['filterExt' => $exts]);
+                $imagesCount = count($imageEntries);
+                if ($imagesCount === 0) {
+                    $imageEntries = $listFilesRec($uploadsDir, []);
+                    $imagesCount = count($imageEntries);
+                }
+                foreach ($imageEntries as $ent) { $uploadsDiskUsageBytes += (int)($ent['size'] ?? 0); }
+            } catch (\Throwable $e) {}
+
+            $databasesCount = 0;
+            try {
+                $dbExts = ['sqlite','db'];
+                $databasesCount = $countFilesRec($dataDir, ['filterExt' => $dbExts]);
+            } catch (\Throwable $e) {}
+
+            $systemFilesCount = 0;
+            try {
+                $systemFilesCount = $countFilesRec($dataDir, ['skip' => ['uploads']]);
+            } catch (\Throwable $e) {}
+
+            $allFilesCount = 0;
+            try {
+                $root = $base;
+                $allFilesCount = $countFilesRec($root, ['skip' => ['node_modules','.git']]);
+            } catch (\Throwable $e) {}
+
+            // Range-limited totals
+            $usersNewInRange = (int)(DB::one("SELECT COUNT(*) AS c FROM users WHERE created_at >= ?", [$rangeStartIso])['c'] ?? 0);
+            $listingsNewInRange = (int)(DB::one("SELECT COUNT(*) AS c FROM listings WHERE created_at >= ?", [$rangeStartIso])['c'] ?? 0);
+            $approvalsInRange = 0;
+            $rejectionsInRange = 0;
+            try {
+                $approvalsInRange = (int)(DB::one("SELECT COUNT(*) AS c FROM admin_actions WHERE action='approve' AND ts >= ?", [$rangeStartIso])['c'] ?? 0);
+                $rejectionsInRange = (int)(DB::one("SELECT COUNT(*) AS c FROM admin_actions WHERE action='reject' AND ts >= ?", [$rangeStartIso])['c'] ?? 0);
+            } catch (\Throwable $e) {}
+            $reportsInRange = 0;
+            try {
+                $reportsInRange = (int)(DB::one("SELECT COUNT(*) AS c FROM reports WHERE ts >= ?", [$rangeStartIso])['c'] ?? 0);
+            } catch (\Throwable $e) {}
+
+            // Time windows
+            $win = [];
+            for ($i = $daysParam - 1; $i >= 0; $i--) {
+                $start = (clone $now)->setTime(0, 0, 0)->sub(new \DateInterval('P' . $i . 'D'));
+                $end = (clone $start)->add(new \DateInterval('P1D'));
+                $win[] = ['start' => $start, 'end' => $end];
+            }
+
+            $seriesSignups = [];
+            $seriesListingsCreated = [];
+            $seriesApprovals = [];
+            $seriesRejections = [];
+            $seriesReports = [];
+            $seriesVisitorsPerDay = [];
+
+            foreach ($win as $w) {
+                $sIso = $w['start']->format('c');
+                $eIso = $w['end']->format('c');
+                $seriesSignups[] = [
+                    'date' => $w['start']->format('Y-m-d'),
+                    'count' => (int)(DB::one("SELECT COUNT(*) AS c FROM users WHERE created_at >= ? AND created_at < ?", [$sIso, $eIso])['c'] ?? 0)
+                ];
+                $seriesListingsCreated[] = [
+                    'date' => $w['start']->format('Y-m-d'),
+                    'count' => (int)(DB::one("SELECT COUNT(*) AS c FROM listings WHERE created_at >= ? AND created_at < ?", [$sIso, $eIso])['c'] ?? 0)
+                ];
+                $seriesApprovals[] = [
+                    'date' => $w['start']->format('Y-m-d'),
+                    'count' => (int)(DB::one("SELECT COUNT(*) AS c FROM admin_actions WHERE action = 'approve' AND ts >= ? AND ts < ?", [$sIso, $eIso])['c'] ?? 0)
+                ];
+                $seriesRejections[] = [
+                    'date' => $w['start']->format('Y-m-d'),
+                    'count' => (int)(DB::one("SELECT COUNT(*) AS c FROM admin_actions WHERE action = 'reject' AND ts >= ? AND ts < ?", [$sIso, $eIso])['c'] ?? 0)
+                ];
+                $cVisitors = 0;
+                try {
+                    $cVisitors = (int)(DB::one("SELECT COUNT(DISTINCT ip) AS c FROM listing_views WHERE ts >= ? AND ts < ? AND ip IS NOT NULL AND TRIM(ip) <> ''", [$sIso, $eIso])['c'] ?? 0);
+                } catch (\Throwable $e) {}
+                $seriesVisitorsPerDay[] = ['date' => $w['start']->format('Y-m-d'), 'count' => $cVisitors];
+                $cReports = 0;
+                try {
+                    $cReports = (int)(DB::one("SELECT COUNT(*) AS c FROM reports WHERE ts >= ? AND ts < ?", [$sIso, $eIso])['c'] ?? 0);
+                } catch (\Throwable $e) {}
+                $seriesReports[] = ['date' => $w['start']->format('Y-m-d'), 'count' => $cReports];
+            }
+
+            // Images added per day (based on mtime)
+            $imagesAddedPerDay = [];
+            $buckets = [];
+            foreach ($imageEntries as $ent) {
+                if (!isset($ent['mtime'])) continue;
+                $d = gmdate('Y-m-d', (int)$ent['mtime']);
+                $buckets[$d] = ($buckets[$d] ?? 0) + 1;
+            }
+            foreach ($win as $w) {
+                $key = $w['start']->format('Y-m-d');
+                $imagesAddedPerDay[] = ['date' => $key, 'count' => (int)($buckets[$key] ?? 0)];
+            }
+
+            // Top categories among approved/active listings
+            $topCategories = DB::all("
+              SELECT main_category as category, COUNT(*) as cnt
+              FROM listings
+              WHERE status IN ('Approved','Active') AND main_category IS NOT NULL AND main_category <> ''
+              GROUP BY main_category
+              ORDER BY cnt DESC
+              LIMIT 8
+            ");
+            foreach ($topCategories as &$tc) { $tc['cnt'] = (int)$tc['cnt']; }
+
+            $statusBreakdown = [
+                ['status' => 'Active/Approved', 'count' => $activeListings],
+                ['status' => 'Pending Approval', 'count' => $pendingListings],
+                ['status' => 'Rejected', 'count' => $rejectedListings],
+            ];
+
+            \json_response([
+                'params' => ['days' => $daysParam, 'rangeStart' => $rangeStartIso],
+                'totals' => [
+                    'totalUsers' => $totalUsers,
+                    'bannedUsers' => $bannedUsers,
+                    'suspendedUsers' => $suspendedUsers,
+                    'totalListings' => $totalListings,
+                    'activeListings' => $activeListings,
+                    'pendingListings' => $pendingListings,
+                    'rejectedListings' => $rejectedListings,
+                    'reportPending' => $reportPending,
+                    'reportResolved' => $reportResolved,
+                    'visitorsTotal' => $visitorsTotal,
+                    'imagesCount' => $imagesCount,
+                    'systemFilesCount' => $systemFilesCount,
+                    'databasesCount' => $databasesCount,
+                    'uploadsDiskUsageBytes' => $uploadsDiskUsageBytes,
+                    'allFilesCount' => $allFilesCount
+                ],
+                'rangeTotals' => [
+                    'usersNewInRange' => $usersNewInRange,
+                    'listingsNewInRange' => $listingsNewInRange,
+                    'approvalsInRange' => $approvalsInRange,
+                    'rejectionsInRange' => $rejectionsInRange,
+                    'reportsInRange' => $reportsInRange,
+                    'visitorsInRange' => $visitorsInRange
+                ],
+                'series' => [
+                    'signups' => $seriesSignups,
+                    'listingsCreated' => $seriesListingsCreated,
+                    'approvals' => $seriesApprovals,
+                    'rejections' => $seriesRejections,
+                    'reports' => $seriesReports,
+                    'visitorsPerDay' => $seriesVisitorsPerDay,
+                    'imagesAddedPerDay' => $imagesAddedPerDay
+                ],
+                'topCategories' => $topCategories,
+                'statusBreakdown' => $statusBreakdown
+            ]);
+        } catch (\Throwable $e) {
+            \json_response(['error' => 'Failed to load metrics'], 500);
+        }
     }
 
     public static function usersList(): void
@@ -647,6 +931,235 @@ class AdminController
         }
         $zip->close();
         \json_response(['ok' => true]);
+    }
+
+    private static function filePathToUrl(?string $p): ?string
+    {
+        if (!$p) return null;
+        $filename = basename((string)$p);
+        return $filename ? '/uploads/' . $filename : null;
+    }
+
+    private static function ensureReportsSchema(): void
+    {
+        try {
+            $cols = DB::all("PRAGMA table_info(reports)");
+            $names = array_map(fn($c) => strtolower((string)$c['name']), $cols);
+            if (!in_array('status', $names, true)) {
+                DB::exec("ALTER TABLE reports ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'");
+            }
+            if (!in_array('handled_by', $names, true)) {
+                DB::exec("ALTER TABLE reports ADD COLUMN handled_by INTEGER");
+            }
+            if (!in_array('handled_at', $names, true)) {
+                DB::exec("ALTER TABLE reports ADD COLUMN handled_at TEXT");
+            }
+        } catch (\Throwable $e) {
+            // ignore
+        }
+    }
+
+    // Admin notifications management
+    public static function notificationsList(): void
+    {
+        $admin = self::requireAdmin(); if (!$admin) return;
+        try {
+            $rows = DB::all("
+              SELECT id, title, message, target_email, created_at
+              FROM notifications
+              ORDER BY id DESC
+              LIMIT 200
+            ");
+            \json_response(['results' => $rows]);
+        } catch (\Throwable $e) {
+            \json_response(['error' => 'Failed to load notifications'], 500);
+        }
+    }
+
+    public static function notificationsCreate(): void
+    {
+        $admin = self::requireAdmin(); if (!$admin) return;
+        $b = \read_body_json();
+        $title = trim((string)($b['title'] ?? ''));
+        $message = trim((string)($b['message'] ?? ''));
+        $targetEmail = isset($b['targetEmail']) ? strtolower(trim((string)$b['targetEmail'])) : null;
+        $sendEmailFlag = !empty($b['sendEmail']);
+
+        if ($title === '' || $message === '') {
+            \json_response(['error' => 'title and message are required'], 400);
+            return;
+        }
+
+        if ($targetEmail && $sendEmailFlag) {
+            try {
+                $html = '<div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;">'
+                    . '<h2 style="margin:0 0 10px 0;">' . htmlspecialchars($title, ENT_QUOTES, 'UTF-8') . '</h2>'
+                    . '<div>' . nl2br(htmlspecialchars($message, ENT_QUOTES, 'UTF-8')) . '</div>'
+                    . '</div>';
+                $sent = \App\Services\EmailService::send($targetEmail, $title, $html);
+                if (empty($sent['ok'])) {
+                    // continue with in-app notification regardless
+                }
+            } catch (\Throwable $e) {
+                // continue with in-app notification
+            }
+        }
+
+        try {
+            DB::exec("
+              INSERT INTO notifications (title, message, target_email, created_at)
+              VALUES (?, ?, ?, ?)
+            ", [$title, $message, $targetEmail ?: null, gmdate('c')]);
+            \json_response(['ok' => true]);
+        } catch (\Throwable $e) {
+            \json_response(['error' => 'Failed to create notification'], 500);
+        }
+    }
+
+    public static function notificationsDelete(array $params): void
+    {
+        $admin = self::requireAdmin(); if (!$admin) return;
+        $id = (int)($params['id'] ?? 0);
+        if (!$id) { \json_response(['error' => 'Invalid id'], 400); return; }
+        try {
+            DB::exec("DELETE FROM notifications WHERE id = ?", [$id]);
+            try { DB::exec("DELETE FROM notification_reads WHERE notification_id = ?", [$id]); } catch (\Throwable $e) {}
+            \json_response(['ok' => true]);
+        } catch (\Throwable $e) {
+            \json_response(['error' => 'Failed to delete notification'], 500);
+        }
+    }
+
+    // Reports management
+    public static function reportsList(): void
+    {
+        $admin = self::requireAdmin(); if (!$admin) return;
+        self::ensureReportsSchema();
+        $status = strtolower((string)($_GET['status'] ?? 'pending'));
+        try {
+            if ($status === 'pending' || $status === 'resolved') {
+                $rows = DB::all("SELECT * FROM reports WHERE status = ? ORDER BY id DESC LIMIT 500", [$status]);
+            } else {
+                $rows = DB::all("SELECT * FROM reports ORDER BY id DESC LIMIT 500");
+            }
+            \json_response(['results' => $rows]);
+        } catch (\Throwable $e) {
+            \json_response(['error' => 'Failed to load reports'], 500);
+        }
+    }
+
+    public static function reportResolve(array $params): void
+    {
+        $admin = self::requireAdmin(); if (!$admin) return;
+        self::ensureReportsSchema();
+        $id = (int)($params['id'] ?? 0);
+        if (!$id) { \json_response(['error' => 'Invalid id'], 400); return; }
+        try {
+            DB::exec("UPDATE reports SET status = 'resolved', handled_by = ?, handled_at = ? WHERE id = ?", [$admin['id'], gmdate('c'), $id]);
+            \json_response(['ok' => true]);
+        } catch (\Throwable $e) {
+            \json_response(['error' => 'Failed to resolve report'], 500);
+        }
+    }
+
+    public static function reportDelete(array $params): void
+    {
+        $admin = self::requireAdmin(); if (!$admin) return;
+        $id = (int)($params['id'] ?? 0);
+        if (!$id) { \json_response(['error' => 'Invalid id'], 400); return; }
+        try {
+            DB::exec("DELETE FROM reports WHERE id = ?", [$id]);
+            \json_response(['ok' => true]);
+        } catch (\Throwable $e) {
+            \json_response(['error' => 'Failed to delete report'], 500);
+        }
+    }
+
+    // Admin listing management
+    public static function userListings(array $params): void
+    {
+        $admin = self::requireAdmin(); if (!$admin) return;
+        $userId = (int)($params['id'] ?? 0);
+        if (!$userId) { \json_response(['error' => 'Invalid user id'], 400); return; }
+        try {
+            $user = DB::one("SELECT email FROM users WHERE id = ?", [$userId]);
+            if (!$user || empty($user['email'])) { \json_response(['error' => 'User not found'], 404); return; }
+            $rows = DB::all("
+              SELECT id, main_category, title, location, price, status, thumbnail_path, created_at, is_urgent
+              FROM listings
+              WHERE LOWER(owner_email) = LOWER(?)
+              ORDER BY created_at DESC
+              LIMIT 300
+            ", [strtolower(trim((string)$user['email']))]);
+            $results = [];
+            foreach ($rows as $r) {
+                $results[] = [
+                    'id' => (int)$r['id'],
+                    'main_category' => $r['main_category'],
+                    'title' => $r['title'],
+                    'location' => $r['location'],
+                    'price' => $r['price'],
+                    'status' => $r['status'],
+                    'thumbnail_url' => self::filePathToUrl($r['thumbnail_path']),
+                    'created_at' => $r['created_at'],
+                    'urgent' => !!$r['is_urgent'],
+                    'is_urgent' => !!$r['is_urgent']
+                ];
+            }
+            \json_response(['results' => $results, 'user' => ['id' => $userId, 'email' => $user['email']]]);
+        } catch (\Throwable $e) {
+            \json_response(['error' => 'Failed to load user listings'], 500);
+        }
+    }
+
+    public static function listingUrgent(array $params): void
+    {
+        $admin = self::requireAdmin(); if (!$admin) return;
+        $id = (int)($params['id'] ?? 0);
+        $b = \read_body_json();
+        $urgent = !empty($b['urgent']);
+        if (!$id) { \json_response(['error' => 'Invalid listing id'], 400); return; }
+        try {
+            DB::exec("UPDATE listings SET is_urgent = ? WHERE id = ?", [$urgent ? 1 : 0, $id]);
+            DB::exec("CREATE TABLE IF NOT EXISTS admin_actions (id INTEGER PRIMARY KEY AUTOINCREMENT, admin_id INTEGER NOT NULL, listing_id INTEGER NOT NULL, action TEXT NOT NULL, reason TEXT, ts TEXT NOT NULL)");
+            DB::exec("INSERT INTO admin_actions (admin_id, listing_id, action, ts) VALUES (?, ?, ?, ?)", [$admin['id'], $id, $urgent ? 'urgent_on' : 'urgent_off', gmdate('c')]);
+            \json_response(['ok' => true, 'urgent' => $urgent]);
+        } catch (\Throwable $e) {
+            \json_response(['error' => 'Failed to update urgent flag'], 500);
+        }
+    }
+
+    public static function listingDelete(array $params): void
+    {
+        $admin = self::requireAdmin(); if (!$admin) return;
+        $id = (int)($params['id'] ?? 0);
+        if (!$id) { \json_response(['error' => 'Invalid listing id'], 400); return; }
+        try {
+            $listing = DB::one("SELECT * FROM listings WHERE id = ?", [$id]);
+            if (!$listing) { \json_response(['error' => 'Listing not found'], 404); return; }
+
+            // Delete associated images
+            $images = DB::all("SELECT path, medium_path FROM listing_images WHERE listing_id = ?", [$id]);
+            foreach ($images as $img) {
+                if (!empty($img['path'])) @unlink($img['path']);
+                if (!empty($img['medium_path'])) @unlink($img['medium_path']);
+            }
+            if (!empty($listing['thumbnail_path'])) @unlink($listing['thumbnail_path']);
+            if (!empty($listing['medium_path'])) @unlink($listing['medium_path']);
+            if (!empty($listing['og_image_path'])) @unlink($listing['og_image_path']);
+
+            DB::exec("DELETE FROM listing_images WHERE listing_id = ?", [$id]);
+            DB::exec("DELETE FROM reports WHERE listing_id = ?", [$id]);
+            DB::exec("DELETE FROM notifications WHERE listing_id = ?", [$id]);
+            DB::exec("DELETE FROM listings WHERE id = ?", [$id]);
+
+            DB::exec("CREATE TABLE IF NOT EXISTS admin_actions (id INTEGER PRIMARY KEY AUTOINCREMENT, admin_id INTEGER NOT NULL, listing_id INTEGER NOT NULL, action TEXT NOT NULL, reason TEXT, ts TEXT NOT NULL)");
+            DB::exec("INSERT INTO admin_actions (admin_id, listing_id, action, ts) VALUES (?, ?, 'delete_listing', ?)", [$admin['id'], $id, gmdate('c')]);
+
+            \json_response(['ok' => true]);
+        } catch (\Throwable $e) {
+            \json_response(['error' => 'Failed to delete listing'], 500);
+        }
     }
 
     private static function isValidJson(string $s): bool
