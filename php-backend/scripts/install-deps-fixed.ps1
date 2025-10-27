@@ -13,8 +13,36 @@ function Write-Err($msg)  { Write-Host "[ERROR] $msg" -ForegroundColor Red }
 $phpBackend = (Resolve-Path (Split-Path -Parent $PSScriptRoot)).Path
 $vendorAutoload = Join-Path $phpBackend "vendor\autoload.php"
 $localComposerPhar = Join-Path $phpBackend "composer.phar"
+$composerLock = Join-Path $phpBackend "composer.lock"
+$vendorDir = Join-Path $phpBackend "vendor"
 
 Write-Info ("PHP backend dir: {0}" -f $phpBackend)
+
+# Early exit: if dependencies already installed, skip download/install.
+if (Test-Path $vendorAutoload) {
+    Write-Info "Dependencies already installed (vendor/autoload.php present)."
+
+    # Verify PHPMailer and exit if OK
+    $phpCmdTmp = Get-Command php -ErrorAction SilentlyContinue
+    if ($phpCmdTmp) {
+        $phpTestCmd = @"
+require '$vendorAutoload';
+echo class_exists('PHPMailer\\PHPMailer\\PHPMailer') ? 'OK' : 'MISSING';
+"@
+        try {
+            $existsOut = & $phpCmdTmp.Source -r $phpTestCmd
+        } catch { $existsOut = "MISSING" }
+        Write-Info ("PHPMailer class_exists: {0}" -f $existsOut)
+        if ($existsOut -eq "OK") {
+            Write-Info "All good. Skipping installation steps."
+            exit 0
+        } else {
+            Write-Warn "PHPMailer missing; will proceed to Composer setup to install it."
+        }
+    } else {
+        Write-Warn "PHP not found in PATH during verification; proceeding to full setup."
+    }
+}
 
 # 1) Ensure PHP available
 $phpCmd = Get-Command php -ErrorAction SilentlyContinue
@@ -77,26 +105,36 @@ if ($composerAvailable) {
     }
 }
 
-# 4) Run composer install
-Push-Location $phpBackend
-$installOk = $false
-try {
-    if ($composerAvailable -and $composerCmd) {
-        Write-Info "Running: composer install"
-        composer install
-        $installOk = $true
-    } elseif (Test-Path $localComposerPhar) {
-        Write-Info "Running: php composer.phar install"
-        php ".\composer.phar" install
-        $installOk = $true
-    } else {
-        Write-Err "Composer is not available. Aborting."
-        exit 1
+# 4) Run composer install (skip if vendor exists and lock present)
+$needInstall = $true
+if ((Test-Path $vendorDir) -and (Test-Path $composerLock)) {
+    Write-Info "composer.lock and vendor/ detected. Skipping 'composer install'."
+    $needInstall = $false
+}
+
+if ($needInstall) {
+    Push-Location $phpBackend
+    $installOk = $false
+    try {
+        if ($composerAvailable -and $composerCmd) {
+            Write-Info "Running: composer install"
+            composer install
+            $installOk = $true
+        } elseif (Test-Path $localComposerPhar) {
+            Write-Info "Running: php composer.phar install"
+            php ".\composer.phar" install
+            $installOk = $true
+        } else {
+            Write-Err "Composer is not available. Aborting."
+            exit 1
+        }
+    } catch {
+        Write-Warn ("composer install failed: {0}" -f $_.Exception.Message)
+    } finally {
+        Pop-Location
     }
-} catch {
-    Write-Warn ("composer install failed: {0}" -f $_.Exception.Message)
-} finally {
-    Pop-Location
+} else {
+    Write-Info "Using existing installed packages."
 }
 
 # 5) Verify vendor/autoload.php (and try a targeted fallback if ext-fileinfo blocks install)
