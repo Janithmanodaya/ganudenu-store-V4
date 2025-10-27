@@ -1497,8 +1497,23 @@ export default function AdminPage() {
               {pending.length === 0 && <p className="text-muted">No pending items.</p>}
               {pending.map(p => (
                 <div key={p.id} className="card" style={{ marginBottom: 8 }}>
-                  <div><strong>#{p.id}</strong> {p.title}</div>
-                  <div className="text-muted">{p.main_category} • {new Date(p.created_at).toLocaleString()}</div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      <strong>#{p.id}</strong> {p.title}
+                    </div>
+                    <div className="text-muted" style={{ whiteSpace: 'nowrap' }}>
+                      {new Date(p.created_at).toLocaleString()}
+                    </div>
+                  </div>
+                  <div className="text-muted" style={{ marginTop: 4 }}>
+                    {p.main_category} • <span title="Owner email">{p.owner_email || 'Unknown'}</span>
+                    {p.remark_number ? <> • Remark: <strong>{p.remark_number}</strong></> : null}
+                  </div>
+                  {p.description && (
+                    <div className="text-muted" style={{ marginTop: 6, maxHeight: 80, overflow: 'hidden' }}>
+                      {p.description}
+                    </div>
+                  )}
                   <button className="btn" style={{ marginTop: 6 }} onClick={() => loadDetail(p.id)}>Open</button>
                 </div>
               ))}
@@ -1508,6 +1523,47 @@ export default function AdminPage() {
                 <div className="h2">Edit Listing #{selectedId}</div>
                 <div className="text-muted">Category: {detail.listing.main_category}</div>
                 <div className="text-muted">Title: {detail.listing.title}</div>
+                <div className="text-muted" style={{ marginTop: 4 }}>
+                  <span title="Owner email">Owner: {detail.listing.owner_email || 'Unknown'}</span>
+                  {detail.listing.remark_number ? <> • Remark: <strong>{detail.listing.remark_number}</strong></> : null}
+                </div>
+
+                {/* Description preview */}
+                {detail.listing.description && (
+                  <div className="card" style={{ marginTop: 8 }}>
+                    <div className="h2" style={{ marginTop: 0 }}>Description</div>
+                    <div className="text-muted" style={{ whiteSpace: 'pre-wrap' }}>
+                      {detail.listing.description}
+                    </div>
+                  </div>
+                )}
+
+                {/* Images preview */}
+                {Array.isArray(detail.images) && detail.images.length > 0 && (
+                  <div className="card" style={{ marginTop: 8 }}>
+                    <div className="h2" style={{ marginTop: 0 }}>Images</div>
+                    <div className="grid five" style={{ gap: 10 }}>
+                      {detail.images.map(im => {
+                        const filename = String(im.path || '').split(/[\\\/]/).pop()
+                        const url = filename ? `/uploads/${filename}` : ''
+                        return (
+                          <div key={im.id || url} className="card" style={{ padding: 0, height: 120, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                            {url ? (
+                              <img
+                                src={url}
+                                alt={im.original_name || 'image'}
+                                style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 12 }}
+                              />
+                            ) : (
+                              <div className="text-muted">No image</div>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+
                 <div style={{ marginTop: 8 }}>
                   <label className="text-muted">Structured JSON</label>
                   <textarea className="textarea" value={editStructured} onChange={e => setEditStructured(e.target.value)} />
