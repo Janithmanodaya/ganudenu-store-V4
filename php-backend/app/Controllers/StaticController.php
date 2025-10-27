@@ -97,6 +97,8 @@ class StaticController
 
     public static function maintenanceStream(): void
     {
+        // Allow long-lived SSE without timing out (especially under PHP built-in server)
+        @set_time_limit(0);
         SSE::start();
         $current = function () {
             $row = DB::one("SELECT maintenance_mode, maintenance_message FROM admin_config WHERE id = 1");
