@@ -899,7 +899,8 @@ class AuthController
         $sent = EmailService::send($email, $subject, "<p>Your login OTP is: <strong>{$otp}</strong></p>");
         if (!$sent['ok']) {
             DB::exec("DELETE FROM otps WHERE email = ? AND otp = ?", [$email, $otp]);
-            \json_response(['error' => 'Failed to send OTP email.'], 502);
+            $detail = isset($sent['error']) ? (string)$sent['error'] : 'unknown';
+            \json_response(['error' => 'Failed to send OTP email.', 'detail' => $detail], 502);
             return;
         }
         \json_response(['ok' => true, 'otp_required' => true, 'is_admin' => !!$user['is_admin'], 'message' => 'OTP sent to your email.']);
@@ -1000,7 +1001,8 @@ class AuthController
         $sent = EmailService::send($email, 'Your Password Reset OTP', "<p>Your OTP for password reset is: <strong>{$otp}</strong></p>");
         if (!$sent['ok']) {
             DB::exec("DELETE FROM otps WHERE email = ? AND otp = ?", [$email, $otp]);
-            \json_response(['error' => 'Failed to send OTP email.'], 502);
+            $detail = isset($sent['error']) ? (string)$sent['error'] : 'unknown';
+            \json_response(['error' => 'Failed to send OTP email.', 'detail' => $detail], 502);
             return;
         }
         \json_response(['ok' => true, 'message' => 'If a matching account was found, an OTP has been sent.']);
