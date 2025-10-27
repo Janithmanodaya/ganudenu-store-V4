@@ -5,6 +5,7 @@
  *    - Frontend build (index.html + assets from dist/)
  *    - .htaccess to route /api and /uploads to PHP backend, and SPA fallback
  *    - api/ PHP backend (index.php + app/ + config/ + composer files + optional vendor/)
+ *    - api/.htaccess with hardening (deny sensitive files, force front controller)
  *    - api/.env with production-safe defaults (DB_PATH, UPLOADS_PATH, PUBLIC_DOMAIN, etc.)
  *    - api/var/ (writable folders) and api/var/uploads/
  *
@@ -79,6 +80,14 @@ function writeRootHtaccess() {
   const ht = `
 RewriteEngine On
 
+# Basic security headers
+<IfModule mod_headers.c>
+Header set X-Frame-Options "SAMEORIGIN"
+Header set X-Content-Type-Options "nosniff"
+Header set Referrer-Policy "no-referrer-when-downgrade"
+Header set Permissions-Policy "geolocation=(), microphone=(), camera=()"
+</IfModule>
+
 # Route API and uploads requests to PHP backend
 RewriteCond %{REQUEST_URI} ^/api [NC]
 RewriteRule ^ api/index.php [L]
@@ -95,6 +104,41 @@ RewriteRule ^ - [L]
 RewriteRule . index.html [L]
 `.trim() + '\n';
   fs.writeFileSync(path.join(OUT, '.htaccess'), ht, 'utf8');
+}
+
+function writeApiHtaccess() {
+  const ht = `
+# Security hardening for API directory
+Options -Indexes
+RewriteEngine On
+
+# Force front-controller for non-existing files/dirs
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^ index.php [L]
+
+# Deny access to sensitive files
+<FilesMatch "(?i)\\.(env|lock|phar|ya?ml|sql|sqlite|sqlite3|md|log)$">
+  Require all denied
+</FilesMatch>
+
+# Disallow direct access to PHP files other than index.php
+<FilesMatch "(?i)^(?!index\\.php$).+\\.php$">
+  Require all denied
+</FilesMatch>
+
+# Block access to internal directories
+RewriteRule ^(app|config|database|tests|reports|nginx|scripts|vendor)(/|$) - [F,L]
+
+# Security headers
+<IfModule mod_headers.c>
+Header set X-Frame-Options "SAMEORIGIN"
+Header set X-Content-Type-Options "nosniff"
+Header set Referrer-Policy "no-referrer-when-downgrade"
+Header set Permissions-Policy "geolocation=(), microphone=(), camera=()"
+</IfModule>
+`.trim() + '\n';
+  fs.writeFileSync(path.join(API_OUT, '.htaccess'), ht, 'utf8');
 }
 
 function createOutStructure() {
@@ -131,20 +175,43 @@ function copyPhpBackend() {
 }
 
 function writeApiEnv() {
-  const env = [
-    'APP_ENV=production',
-    'PUBLIC_DOMAIN=https://ganudenu.store',
-    'PUBLIC_ORIGIN=https://ganudenu.store',
-    'TRUST_PROXY_HOPS=1',
-    // Place DB under api/var to avoid exposing it at web root
-    `DB_PATH=${path.join(API_VAR, 'ganudenu.sqlite').replace(/\\\\/g, '/')}`,
-    `UPLOADS_PATH=${API_UPLOADS.replace(/\\\\/g, '/')}`,
-    'CORS_ORIGINS=https://ganudenu.store',
+  // To avoid phpdotenv escape parsing on Windows backslashes, always write forward slashes
+  // and use single quotes (phpdotenv treats single-quoted values literally).
+  const toPosix = (p) => p.replace(/\\\\/g, '/');
+  const DB_PATH = toPosix(path.join(API_VAR, 'ganudenu.sqlite'));
+  const UPLOADS = toPosix(API_UPLOADS);
+  const ORIGIN = 'https://ganudenu.store';
+  const lines = [
+    `APP_ENV='production'`,
+    `PUBLIC_DOMAIN='${ORIGIN}'`,
+    `PUBLIC_ORIGIN='${ORIGIN}'`,
+    `TRUST_PROXY_HOPS='1'`,
+    `DB_PATH='${DB_PATH}'`,
+    `UPLOADS_PATH='${UPLOADS}'`,
+    `CORS_ORIGINS='${ORIGIN}'`,
     // Admin email default is already handled in code; set if you want:
-    // 'ADMIN_EMAIL=janithmanodaya2002@gmail.com',
-    // 'ADMIN_PASSWORD=change_me',
-  ].join('\n') + '\n';
-  fs.writeFileSync(path.join(API_OUT, '.env'), env, 'utf8');
+    // `ADMIN_EMAIL='janithmanodaya2002@gmail.com'`,
+    // `ADMIN_PASSWORD='change_me'`,
+  ];
+  const envPath = path.join(API_OUT, '.env');
+  try { fs.unlinkSync(envPath); } catch {}
+  fs.writeFileSync(envPath, lines.join('\n') + '\n', 'utf8');
+  log(`Wrote ${envPath} with DB_PATH=${DB_PATH} and UPLOADS_PATH=${UPLOADS}`);
+}
+
+function fixApiIndexRequire() {
+  const idx = path.join(API_OUT, 'index.php');
+  if (!fs.existsSync(idx)) return;
+  let src = fs.readFileSync(idx, 'utf8');
+  // Adjust require path from ../app/bootstrap.php (original path under public/)
+  // to ./app/bootstrap.php (since app/ is inside api/)
+  const before = "/../app/bootstrap.php";
+  const after = "/app/bootstrap.php";
+  if (src.includes(before)) {
+    src = src.replace(before, after);
+    fs.writeFileSync(idx, src, 'utf8');
+    log('Patched api/index.php require path to /app/bootstrap.php');
+  }
 }
 
 function main() {
@@ -154,6 +221,8 @@ function main() {
   copyFrontend();
   writeRootHtaccess();
   copyPhpBackend();
+  writeApiHtaccess();
+  fixApiIndexRequire();
   writeApiEnv();
 
   log('Done. Upload the contents of host-deploy/ to your hosting public_html.');
