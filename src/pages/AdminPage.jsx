@@ -4,9 +4,17 @@ import CustomSelect from '../components/CustomSelect.jsx'
 
 export default function AdminPage() {
   const navigate = useNavigate()
-  const [adminEmail, setAdminEmail] = useState('')
-  const [authToken, setAuthToken] = useState('')
-  const [allowed, setAllowed] = useState(false)
+  // Prime local state from localStorage immediately to avoid false "Access denied" flashes
+  const [adminEmail, setAdminEmail] = useState(() => {
+    try { return (JSON.parse(localStorage.getItem('user') || 'null')?.email) || '' } catch { return '' }
+  })
+  const [authToken, setAuthToken] = useState(() => {
+    try { return localStorage.getItem('auth_token') || '' } catch { return '' }
+  })
+  const [allowed, setAllowed] = useState(() => {
+    try { return !!(JSON.parse(localStorage.getItem('user') || 'null')?.is_admin) } catch { return false }
+  })
+  const [loading, setLoading] = useState(true)
   const [status, setStatus] = useState(null)
 
   // Config
@@ -105,8 +113,8 @@ export default function AdminPage() {
       try {
         const user = JSON.parse(localStorage.getItem('user') || 'null')
         const token = localStorage.getItem('auth_token') || ''
-        const email = user?.email || ''
         if (token) setAuthToken(token)
+
         let allowedByStatus = false
         try {
           const hdrs = token ? { 'Authorization': `Bearer ${token}`, 'Cache-Control': 'no-store' } : { 'Cache-Control': 'no-store' }
@@ -130,7 +138,7 @@ export default function AdminPage() {
               data = isHtml ? {} : {}
             } catch (_) { data = {} }
           }
-          // If response looks like HTML or not OK, retry against backend dev URL
+          // If response looks like HTML or not OK, retry against backend dev URL (cookie-origin)
           if (!r.ok || isHtml) {
             try {
               const backendUrl = 'http://localhost:5174'
@@ -144,17 +152,19 @@ export default function AdminPage() {
               // keep data as {}
             }
           }
-          if (r.ok && data && data.is_admin) {
-            allowedByStatus = true
-            setAllowed(true)
-            const serverEmail = String(data.email || '')
-            setAdminEmail(serverEmail)
-            if (token) setAuthToken(token)
-            // Persist updated admin flag to avoid stale local state
-            try {
-              const nextUser = { ...(user || {}), email: serverEmail || (user?.email || ''), is_admin: true }
-              localStorage.setItem('user', JSON.stringify(nextUser))
-            } catch (_) {}
+          if (r.ok && data) {
+            // Take email and is_admin from server truth
+            const serverEmail = String(data.email || (user?.email || ''))
+            if (serverEmail) setAdminEmail(serverEmail)
+            if (data.is_admin) {
+              allowedByStatus = true
+              setAllowed(true)
+              if (token) setAuthToken(token)
+              try {
+                const nextUser = { ...(user || {}), email: serverEmail, is_admin: true }
+                localStorage.setItem('user', JSON.stringify(nextUser))
+              } catch (_) {}
+            }
           }
         } catch (_) {
           // ignore here, we may probe admin endpoints next
@@ -171,35 +181,25 @@ export default function AdminPage() {
             })
             if (r2.ok) {
               setAllowed(true)
-              // If we don't have an email yet, keep previous or derive from local user
               const emailGuess = (user && user.email) ? String(user.email) : ''
-              if (emailGuess) setAdminEmail(emailGuess)
+              if (emailGuess && !adminEmail) setAdminEmail(emailGuess)
               try {
                 const nextUser = { ...(user || {}), email: emailGuess, is_admin: true }
                 localStorage.setItem('user', JSON.stringify(nextUser))
               } catch (_) {}
-              return
             }
           } catch (_) {
             // continue to fallback
           }
         }
-
-        // Fallback: use localStorage snapshot
-        if (!allowedByStatus) {
-          if (user && user.is_admin && user.email) {
-            setAllowed(true)
-            setAdminEmail(user.email)
-            if (token) setAuthToken(token)
-          } else {
-            setAllowed(false)
-          }
-        }
       } catch (_) {
-        setAllowed(false)
+        // leave allowed as-is (from localStorage) on errors
+      } finally {
+        setLoading(false)
       }
     }
     init()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // Load initial data when allowed
@@ -918,12 +918,12 @@ export default function AdminPage() {
     )
   }
 
-  if (!allowed) {
+  if (loading) {
     return (
-      <div className="center">
-        <div className="card">
-          <div className="h1">Admin Dashboard</div>
-          <p className="text-muted">Access denied. Admins only.</p>
+     < div className="center">
+       < div className="card">
+         < div className="h1">Admin Dashboa</d<div>
+         < p className="text-muted">Checkingdenied. Admins only.</p>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="btn primary" onClick={() => navigate('/auth')}>Go to Login</button>
             <button className="btn" onClick={() => navigate('/')}>Home</button>
