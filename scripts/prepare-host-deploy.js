@@ -5,6 +5,7 @@
  *    - Frontend build (index.html + assets from dist/)
  *    - .htaccess to route /api and /uploads to PHP backend, and SPA fallback
  *    - api/ PHP backend (index.php + app/ + config/ + composer files + optional vendor/)
+ *    - api/.htaccess with hardening (deny sensitive files, force front controller)
  *    - api/.env with production-safe defaults (DB_PATH, UPLOADS_PATH, PUBLIC_DOMAIN, etc.)
  *    - api/var/ (writable folders) and api/var/uploads/
  *
@@ -79,6 +80,14 @@ function writeRootHtaccess() {
   const ht = `
 RewriteEngine On
 
+# Basic security headers
+<IfModule mod_headers.c>
+Header set X-Frame-Options "SAMEORIGIN"
+Header set X-Content-Type-Options "nosniff"
+Header set Referrer-Policy "no-referrer-when-downgrade"
+Header set Permissions-Policy "geolocation=(), microphone=(), camera=()"
+</IfModule>
+
 # Route API and uploads requests to PHP backend
 RewriteCond %{REQUEST_URI} ^/api [NC]
 RewriteRule ^ api/index.php [L]
@@ -95,6 +104,41 @@ RewriteRule ^ - [L]
 RewriteRule . index.html [L]
 `.trim() + '\n';
   fs.writeFileSync(path.join(OUT, '.htaccess'), ht, 'utf8');
+}
+
+function writeApiHtaccess() {
+  const ht = `
+# Security hardening for API directory
+Options -Indexes
+RewriteEngine On
+
+# Force front-controller for non-existing files/dirs
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^ index.php [L]
+
+# Deny access to sensitive files
+<FilesMatch "(?i)\\.(env|lock|phar|ya?ml|sql|sqlite|sqlite3|md|log)$">
+  Require all denied
+</FilesMatch>
+
+# Disallow direct access to PHP files other than index.php
+<FilesMatch "(?i)^(?!index\\.php$).+\\.php$">
+  Require all denied
+</FilesMatch>
+
+# Block access to internal directories
+RewriteRule ^(app|config|database|tests|reports|nginx|scripts|vendor)(/|$) - [F,L]
+
+# Security headers
+<IfModule mod_headers.c>
+Header set X-Frame-Options "SAMEORIGIN"
+Header set X-Content-Type-Options "nosniff"
+Header set Referrer-Policy "no-referrer-when-downgrade"
+Header set Permissions-Policy "geolocation=(), microphone=(), camera=()"
+</IfModule>
+`.trim() + '\n';
+  fs.writeFileSync(path.join(API_OUT, '.htaccess'), ht, 'utf8');
 }
 
 function createOutStructure() {
@@ -154,6 +198,7 @@ function main() {
   copyFrontend();
   writeRootHtaccess();
   copyPhpBackend();
+  writeApiHtaccess();
   writeApiEnv();
 
   log('Done. Upload the contents of host-deploy/ to your hosting public_html.');
