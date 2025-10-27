@@ -3,6 +3,24 @@ require __DIR__ . '/../app/bootstrap.php';
 
 cors_allow();
 
+/**
+ * Optional route override for hosts without rewrite rules.
+ * If a request is sent to /api/index.php?r=/api/XYZ, use the provided path for routing.
+ * This allows frontend to call /api/index.php with the desired route in the r query param.
+ */
+if (isset($_GET['r']) && is_string($_GET['r'])) {
+    $override = $_GET['r'];
+    $p = parse_url($override, PHP_URL_PATH) ?: '/';
+    // Sanitize and only allow /api/* or /uploads/* overrides
+    if (str_starts_with($p, '/api/') || str_starts_with($p, '/uploads/')) {
+        // Override REQUEST_URI for downstream static serving and router
+        $_SERVER['REQUEST_URI'] = $p;
+        // Also adjust QUERY_STRING if the override contains a query part
+        $q = parse_url($override, PHP_URL_QUERY) ?: '';
+        $_SERVER['QUERY_STRING'] = $q;
+    }
+}
+
 // Dev/static: serve /uploads/* from configured UPLOADS_PATH (env) or default to ../../data/uploads with long cache headers
 $pathOnlyStatic = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
 if (preg_match('#^/uploads/(.+)$#', $pathOnlyStatic, $m)) {
