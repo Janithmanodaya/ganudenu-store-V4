@@ -1246,4 +1246,3 @@ class ListingsController
         \json_response(['ok' => true]);
     }
 }
-}

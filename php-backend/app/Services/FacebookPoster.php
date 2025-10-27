@@ -1,5 +1,5 @@
 <?php
-namespace App\\Services;
+namespace App\Services;
 
 class FacebookPoster
 {
@@ -43,7 +43,7 @@ class FacebookPoster
                 $url = isset($json['facebook_post_url']) ? (string)$json['facebook_post_url'] : (isset($json['url']) ? (string)$json['url'] : null);
                 return ['ok' => true, 'url' => $url ?: null];
             }
-        } catch (\\Throwable $e) {
+        } catch (\Throwable $e) {
             // ignore
         }
         return ['ok' => true, 'url' => null];
