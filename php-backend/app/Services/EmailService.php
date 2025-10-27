@@ -16,8 +16,20 @@ class EmailService
         $user = \App\Services\SecureConfig::getSecret('smtp_user') ?? '';
         $pass = \App\Services\SecureConfig::getSecret('smtp_pass') ?? '';
         $port = (int) (\App\Services\SecureConfig::getSecret('smtp_port') ?? (getenv('SMTP_PORT') ?: 587));
-        $secure = strtolower((\App\Services\SecureConfig::getSecret('smtp_secure') ?? (getenv('SMTP_SECURE') ?: ''))) === 'true';
+        $secureRaw = strtolower((\App\Services\SecureConfig::getSecret('smtp_secure') ?? (getenv('SMTP_SECURE') ?: '')));
+        // Interpret secure mode:
+        // - starttls/tls/true => STARTTLS on (usually port 587)
+        // - ssl/smtps/implicit or port 465 => SMTPS (implicit TLS)
+        // - false/0/none/'' => no encryption
+        $secureMode = 'none';
+        if (in_array($secureRaw, ['true', '1', 'tls', 'starttls'], true)) {
+            $secureMode = 'starttls';
+        } elseif (in_array($secureRaw, ['ssl', 'smtps', 'implicit'], true) || $port === 465) {
+            $secureMode = 'smtps';
+        }
         $from = \App\Services\SecureConfig::getSecret('smtp_from') ?? (getenv('SMTP_FROM') ?: 'no-reply@example.com');
+
+        $lastError = null;
 
         if ($host && $user && $pass) {
             try {
@@ -29,8 +41,17 @@ class EmailService
                     $mail->SMTPAuth = true;
                     $mail->Username = $user;
                     $mail->Password = $pass;
-                    $mail->SMTPSecure = $secure ? \PHPMailer\PHPMailer\PHPMailer::ENCRYPTION_STARTTLS : false;
                     $mail->Port = $port;
+                    // AutoTLS allows opportunistic STARTTLS upgrade when supported
+                    $mail->SMTPAutoTLS = true;
+                    if ($secureMode === 'starttls') {
+                        $mail->SMTPSecure = \PHPMailer\PHPMailer\PHPMailer::ENCRYPTION_STARTTLS;
+                    } elseif ($secureMode === 'smtps') {
+                        $mail->SMTPSecure = \PHPMailer\PHPMailer\PHPMailer::ENCRYPTION_SMTPS;
+                        if ($port === 0) $mail->Port = 465;
+                    } else {
+                        $mail->SMTPSecure = false;
+                    }
                     $mail->setFrom($from, 'Ganudenu');
                     $mail->addAddress($to);
                     $mail->isHTML(true);
@@ -42,6 +63,7 @@ class EmailService
                     throw new \Error('PHPMailer not available');
                 }
             } catch (\Throwable $e) {
+                $lastError = 'SMTP: ' . $e->getMessage();
                 // Try native mail() as a lightweight fallback before Brevo
                 error_log('[email] SMTP failed: ' . $e->getMessage());
             }
@@ -56,6 +78,8 @@ class EmailService
             $sent = @mail($to, $subject, $html, implode("\r\n", $headers));
             if ($sent) {
                 return ['ok' => true, 'fallback' => 'mail'];
+            } else {
+                $lastError = $lastError ?: 'mail() returned false';
             }
         }
 
@@ -68,7 +92,8 @@ class EmailService
                 error_log('[email:simulate] ' . $err . ' — simulating send OK in non-production/dev.');
                 return ['ok' => true, 'simulated' => true];
             }
-            return ['ok' => false, 'error' => $err];
+            // Return the most specific error we saw along the way
+            return ['ok' => false, 'error' => ($lastError ?: $err)];
         }
         try {
             $payload = [
@@ -234,7 +259,7 @@ class EmailService
                 error_log('[email:simulate] ' . $err . ' — simulating send OK in non-production/dev.');
                 return ['ok' => true, 'simulated' => true, 'provider' => 'brevo'];
             }
-            return ['ok' => false, 'error' => $err, 'provider' => 'brevo'];
+            return ['ok' => false, 'error' => ($lastError ? $lastError . ' | ' . $err : $err), 'provider' => 'brevo'];
         }
     }
 
