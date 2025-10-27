@@ -19,7 +19,16 @@ class AuthController
     private static function loadEnvFiles(): array
     {
         $out = [];
-        foreach ([__DIR__ . '/../../.env', __DIR__ . '/../../.env.example'] as $file) {
+        // Load env values from multiple candidate locations:
+        // - php-backend/.env
+        // - project-root/.env
+        // - php-backend/.env.example (fallback)
+        $candidates = [
+            __DIR__ . '/../../.env',
+            __DIR__ . '/../../../.env',
+            __DIR__ . '/../../.env.example',
+        ];
+        foreach ($candidates as $file) {
             if (!is_file($file)) continue;
             $lines = @file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
             if (!$lines) continue;
@@ -35,7 +44,7 @@ class AuthController
                 if ($len >= 2) {
                     $first = $val[0];
                     $last = $val[$len - 1];
-                    if (($first === '"' && $last === '"') || ($first === "'" && $last === "'")) {
+                    if (($first === '\"' && $last === '\"') || ($first === "'" && $last === "'")) {
                         $val = substr($val, 1, -1);
                     }
                 }
