@@ -66,6 +66,19 @@ $tmpAiDir = Join-Path $PSScriptRoot "data\tmp_ai"
 if (-not (Test-Path $uploadsDir)) { New-Item -ItemType Directory -Path $uploadsDir | Out-Null }
 if (-not (Test-Path $tmpAiDir)) { New-Item -ItemType Directory -Path $tmpAiDir | Out-Null }
 
+# Install PHP backend packages (Composer) before migrations
+Write-Host ""
+Write-Host "Installing PHP backend dependencies..."
+$installDepsScript = Join-Path $PSScriptRoot "php-backend\scripts\install-deps-fixed.ps1"
+if (Test-Path $installDepsScript) {
+  & $installDepsScript
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "WARNING: PHP dependency installation exited with code $LASTEXITCODE. Proceeding may fail."
+  }
+} else {
+  Write-Host "WARNING: install-deps-fixed.ps1 not found at $installDepsScript"
+}
+
 # Run migrations (safe to run multiple times)
 Write-Host "Running PHP migrations..."
 php "php-backend\scripts\migrate.php"
