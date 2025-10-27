@@ -729,10 +729,20 @@ class ListingsController
     public static function my(): void
     {
         self::ensureSchema();
+        $email = null;
         $tok = JWT::getBearerToken();
         $v = $tok ? JWT::verify($tok) : ['ok' => false];
-        if (!$v['ok']) { \json_response(['error' => 'Missing Authorization bearer token'], 401); return; }
-        $email = strtolower((string)$v['decoded']['email']);
+        if ($v['ok']) {
+            $email = strtolower((string)$v['decoded']['email']);
+        } else {
+            $headerEmail = strtolower(trim((string)($_SERVER['HTTP_X_USER_EMAIL'] ?? '')));
+            if ($headerEmail) {
+                $email = $headerEmail;
+            } else {
+                \json_response(['error' => 'Missing Authorization bearer token or X-User-Email header'], 401);
+                return;
+            }
+        }
 
         $rows = DB::all("
           SELECT id, main_category, title, description, seo_description, structured_json, price, pricing_type, location,
@@ -783,7 +793,8 @@ class ListingsController
     public static function myDrafts(): void
     {
         self::ensureSchema();
-        $tok = JWT::getBearerToken();
+        $email = null;
+BearerToken();
         $v = $tok ? JWT::verify($tok) : ['ok' => false];
         if (!$v['ok']) { \json_response(['error' => 'Missing Authorization bearer token'], 401); return; }
         $email = strtolower((string)$v['decoded']['email']);

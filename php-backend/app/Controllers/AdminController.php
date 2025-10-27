@@ -193,14 +193,67 @@ class AdminController
     {
         $admin = self::requireAdmin(); if (!$admin) return;
         $b = \read_body_json();
-        $bankDetails = isset($b['bankDetails']) ? (string)$b['bankDetails'] : null;
-        $whatsappNumber = isset($b['whatsappNumber']) ? (string)$b['whatsappNumber'] : null;
-        $emailOnApprove = isset($b['emailOnApprove']) ? ($b['emailOnApprove'] ? 1 : 0) : null;
-        $maintenanceMode = isset($b['maintenanceMode']) ? ($b['maintenanceMode'] ? 1 : 0) : null;
-        $maintenanceMessage = array_key_exists('maintenanceMessage', $b) ? (string)$b['maintenanceMessage'] : null;
-        $bankAccountNumber = isset($b['bankAccountNumber']) ? (string)$b['bankAccountNumber'] : null;
-        $bankAccountName = isset($b['bankAccountName']) ? (string)$b['bankAccountName'] : null;
-        $bankName = isset($b['bankName']) ? (string)$b['bankName'] : null;
+
+        // Minimal type validation
+        $errors = [];
+        $has = function (string $k) use ($b) { return array_key_exists($k, $b); };
+        $validateStr = function (string $key, $val, int $minLen, int $maxLen, bool $allowEmpty) use (&$errors) {
+            if ($val === null) return;
+            if (!is_string($val)) { $errors[] = "{$key} must be a string"; return; }
+            $len = strlen(trim((string)$val));
+            if (!$allowEmpty && $len === 0) { $errors[] = "{$key} cannot be empty"; return; }
+            if ($len < $minLen || $len > $maxLen) { $errors[] = "{$key} length must be between {$minLen} and {$maxLen}"; }
+        };
+        $validateBool = function (string $key, $val) use (&$errors) {
+            if ($val === null) return;
+            if (!is_bool($val)) { $errors[] = "{$key} must be a boolean"; }
+        };
+        $validateInt = function (string $key, $val, int $min, int $max) use (&$errors) {
+            if ($val === null) return;
+            if (!is_int($val)) { $errors[] = "{$key} must be an integer"; return; }
+            if ($val < $min || $val > $max) { $errors[] = "{$key} must be between {$min} and {$max}"; }
+        };
+
+        $validateStr('bankDetails', $b['bankDetails'] ?? null, 0, 2000, true);
+        $validateStr('whatsappNumber', $b['whatsappNumber'] ?? null, 0, 64, true);
+        $validateBool('emailOnApprove', $b['emailOnApprove'] ?? null);
+        $validateBool('maintenanceMode', $b['maintenanceMode'] ?? null);
+        $validateStr('maintenanceMessage', $has('maintenanceMessage') ? ($b['maintenanceMessage'] ?? null) : null, 0, 1000, true);
+        $validateStr('bankAccountNumber', $b['bankAccountNumber'] ?? null, 0, 64, true);
+        $validateStr('bankAccountName', $b['bankAccountName'] ?? null, 0, 100, true);
+        $validateStr('bankName', $b['bankName'] ?? null, 0, 100, true);
+
+        if (!empty($b['paymentRules'])) {
+            if (!is_array($b['paymentRules'])) {
+                $errors[] = 'paymentRules must be an array';
+            } else {
+                foreach ($b['paymentRules'] as $i => $rule) {
+                    if (!is_array($rule)) { $errors[] = "paymentRules[{$i}] must be an object"; continue; }
+                    $cat = $rule['category'] ?? null;
+                    if (!is_string($cat) || trim($cat) === '') { $errors[] = "paymentRules[{$i}].category must be a non-empty string"; }
+                    elseif (strlen($cat) > 50) { $errors[] = "paymentRules[{$i}].category must be at most 50 characters"; }
+                    $amt = $rule['amount'] ?? null;
+                    if (!is_int($amt)) { $errors[] = "paymentRules[{$i}].amount must be an integer"; }
+                    elseif ($amt < 0 || $amt > 1000000) { $errors[] = "paymentRules[{$i}].amount must be between 0 and 1000000"; }
+                    $en = $rule['enabled'] ?? null;
+                    if (!is_bool($en)) { $errors[] = "paymentRules[{$i}].enabled must be a boolean"; }
+                }
+            }
+        }
+
+        if (!empty($errors)) {
+            \json_response(['error' => 'Invalid configuration payload', 'details' => $errors], 400);
+            return;
+        }
+
+        $bankDetails = $has('bankDetails') ? (string)$b['bankDetails'] : null;
+        $whatsappNumber = $has('whatsappNumber') ? (string)$b['whatsappNumber'] : null;
+        $emailOnApprove = $has('emailOnApprove') ? ($b['emailOnApprove'] ? 1 : 0) : null;
+        $maintenanceMode = $has('maintenanceMode') ? ($b['maintenanceMode'] ? 1 : 0) : null;
+        $maintenanceMessage = $has('maintenanceMessage') ? (string)$b['maintenanceMessage'] : null;
+        $bankAccountNumber = $has('bankAccountNumber') ? (string)$b['bankAccountNumber'] : null;
+        $bankAccountName = $has('bankAccountName') ? (string)$b['bankAccountName'] : null;
+        $bankName = $has('bankName') ? (string)$b['bankName'] : null;
 
         $row = DB::one("SELECT id FROM admin_config WHERE id = 1");
         if (!$row) DB::exec("INSERT INTO admin_config (id) VALUES (1)");
@@ -224,10 +277,9 @@ class AdminController
               ON CONFLICT(category) DO UPDATE SET amount = excluded.amount, enabled = excluded.enabled
             ");
             foreach ($b['paymentRules'] as $rule) {
-                $cat = trim((string)($rule['category'] ?? ''));
-                $amt = (int)($rule['amount'] ?? 0);
+                $cat = trim((string)$rule['category']);
+                $amt = (int)$rule['amount'];
                 $en = !empty($rule['enabled']) ? 1 : 0;
-                if (!$cat || $amt < 0 || $amt > 1000000) continue;
                 $up->execute([$cat, $amt, $en]);
             }
         }
