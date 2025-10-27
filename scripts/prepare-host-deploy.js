@@ -175,20 +175,23 @@ function copyPhpBackend() {
 }
 
 function writeApiEnv() {
-  const env = [
-    'APP_ENV=production',
-    'PUBLIC_DOMAIN=https://ganudenu.store',
-    'PUBLIC_ORIGIN=https://ganudenu.store',
-    'TRUST_PROXY_HOPS=1',
-    // Place DB under api/var to avoid exposing it at web root
-    `DB_PATH=${path.join(API_VAR, 'ganudenu.sqlite').replace(/\\\\/g, '/')}`,
-    `UPLOADS_PATH=${API_UPLOADS.replace(/\\\\/g, '/')}`,
-    'CORS_ORIGINS=https://ganudenu.store',
+  // Quote values to be safe on Windows (paths may have spaces). Use forward slashes.
+  const DB_PATH = path.join(API_VAR, 'ganudenu.sqlite').replace(/\\\\/g, '/');
+  const UPLOADS = API_UPLOADS.replace(/\\\\/g, '/');
+  const ORIGIN = 'https://ganudenu.store';
+  const lines = [
+    `APP_ENV="production"`,
+    `PUBLIC_DOMAIN="${ORIGIN}"`,
+    `PUBLIC_ORIGIN="${ORIGIN}"`,
+    `TRUST_PROXY_HOPS="1"`,
+    `DB_PATH="${DB_PATH}"`,
+    `UPLOADS_PATH="${UPLOADS}"`,
+    `CORS_ORIGINS="${ORIGIN}"`,
     // Admin email default is already handled in code; set if you want:
-    // 'ADMIN_EMAIL=janithmanodaya2002@gmail.com',
-    // 'ADMIN_PASSWORD=change_me',
-  ].join('\n') + '\n';
-  fs.writeFileSync(path.join(API_OUT, '.env'), env, 'utf8');
+    // `ADMIN_EMAIL="janithmanodaya2002@gmail.com"`,
+    // `ADMIN_PASSWORD="change_me"`,
+  ];
+  fs.writeFileSync(path.join(API_OUT, '.env'), lines.join('\n') + '\n', 'utf8');
 }
 
 function fixApiIndexRequire() {
