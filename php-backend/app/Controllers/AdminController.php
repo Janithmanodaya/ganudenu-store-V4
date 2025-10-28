@@ -9,6 +9,104 @@ use App\Services\SecureConfig;
 
 class AdminController
 {
+    public static function diagnostics(): void
+    {
+        $admin = self::requireAdmin(); if (!$admin) return;
+
+        $checks = [];
+
+        // Helper to add a check
+        $add = function (string $key, bool $ok, string $message = '', array $extra = []) use (&$checks) {
+            $checks[] = ['key' => $key, 'ok' => $ok, 'message' => $message, 'extra' => $extra];
+        };
+
+        // 1) Database connectivity and schema basics
+        try {
+            $one = DB::one('SELECT 1 AS x');
+            $ok = isset($one['x']) && (int)$one['x'] === 1;
+            $add('db_connect', $ok, $ok ? 'Database reachable.' : 'Database probe failed.');
+        } catch (\Throwable $e) {
+            $add('db_connect', false, 'Database error: ' . substr($e->getMessage(), 0, 200));
+        }
+        // Required tables existence
+        $requiredTables = ['users','listings','notifications','otps'];
+        foreach ($requiredTables as $t) {
+            try {
+                $row = DB::one("SELECT name FROM sqlite_master WHERE type='table' AND name = ?", [$t]);
+                $ok = !empty($row['name']);
+                $add("table:{$t}", $ok, $ok ? 'OK' : "Missing table: {$t}");
+            } catch (\Throwable $e) {
+                $add("table:{$t}", false, 'Error checking table: ' . substr($e->getMessage(), 0, 200));
+            }
+        }
+
+        // 2) Filesystem: uploads directory
+        try {
+            $base = realpath(__DIR__ . '/../../..') ?: (__DIR__ . '/../../..');
+            $uploadsDir = $base . '/data/uploads';
+            if (!is_dir($uploadsDir)) @mkdir($uploadsDir, 0775, true);
+            $ok = is_dir($uploadsDir) && is_writable($uploadsDir);
+            $add('fs_uploads_dir', $ok, $ok ? 'uploads/ exists and is writable.' : 'uploads/ not writable or missing.', ['path' => $uploadsDir]);
+        } catch (\Throwable $e) {
+            $add('fs_uploads_dir', false, 'Error checking uploads dir: ' . substr($e->getMessage(), 0, 200));
+        }
+
+        // 3) JWT secret
+        $jwtSet = !!(getenv('JWT_SECRET') ?: '');
+        $add('jwt_secret', $jwtSet, $jwtSet ? 'JWT secret configured.' : 'JWT_SECRET not set.');
+
+        // 4) Public origin/domain configuration
+        $pubOrigin = getenv('PUBLIC_ORIGIN') ?: '';
+        $pubDomain = getenv('PUBLIC_DOMAIN') ?: '';
+        $add('public_origin', $pubOrigin !== '', $pubOrigin ? "PUBLIC_ORIGIN={$pubOrigin}" : 'PUBLIC_ORIGIN not set.');
+        $add('public_domain', $pubDomain !== '', $pubDomain ? "PUBLIC_DOMAIN={$pubDomain}" : 'PUBLIC_DOMAIN not set.');
+
+        // 5) Email providers readiness
+        $smtpHost = getenv('SMTP_HOST') ?: '';
+        $smtpUser = getenv('SMTP_USER') ?: '';
+        $smtpPass = getenv('SMTP_PASS') ?: '';
+        $smtpFrom = getenv('SMTP_FROM') ?: '';
+        $brevoKey = getenv('BREVO_API_KEY') ?: '';
+        $brevoLogin = getenv('BREVO_LOGIN') ?: '';
+        $emailDev = strtolower(getenv('EMAIL_DEV_MODE') ?: '') === 'true';
+
+        $smtpOk = ($smtpHost && $smtpUser && $smtpPass);
+        $brevoOk = ($brevoKey && $brevoLogin);
+        $emailConfigured = $smtpOk || $brevoOk;
+
+        $add('email_config', $emailConfigured, $emailConfigured ? 'Email provider configured.' : 'No email provider configured.', [
+            'smtp' => ['host' => $smtpHost ?: null, 'user_set' => $smtpUser ? true : false, 'pass_set' => $smtpPass ? true : false, 'from' => $smtpFrom ?: null],
+            'brevo' => ['api_key_set' => $brevoKey ? true : false, 'login' => $brevoLogin ?: null],
+            'dev_mode' => $emailDev
+        ]);
+
+        // 6) Google OAuth basic config sanity
+        $gid = getenv('GOOGLE_CLIENT_ID') ?: '';
+        $gsecret = getenv('GOOGLE_CLIENT_SECRET') ?: '';
+        $gredir = getenv('GOOGLE_REDIRECT_URI') ?: '';
+        $pathOk = false;
+        try {
+            $path = (string)(parse_url($gredir, PHP_URL_PATH) ?: '');
+            $pathOk = ($path === '/api/auth/google/callback');
+        } catch (\Throwable $e) {}
+        $oauthOk = ($gid && $gsecret && $gredir && $pathOk);
+        $add('google_oauth', $oauthOk, $oauthOk ? 'Google OAuth appears configured.' : 'Google OAuth missing or invalid redirect path.', [
+            'client_id_set' => $gid ? true : false,
+            'client_secret_set' => $gsecret ? true : false,
+            'redirect_uri' => $gredir ?: null
+        ]);
+
+        // 7) CORS origins parse
+        $cors = getenv('CORS_ORIGINS') ?: '';
+        $corsList = array_filter(array_map('trim', explode(',', $cors)));
+        $add('cors_origins', true, 'CORS_ORIGINS parsed.', ['origins' => $corsList]);
+
+        // 8) Basic runtime health
+        $add('runtime', true, 'Diagnostics executed.');
+
+        \json_response(['ok' => true, 'checks' => $checks]);
+    }
+
     public static function envStatus(): void
     {
         $admin = self::requireAdmin(); if (!$admin) return;

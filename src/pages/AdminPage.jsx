@@ -40,6 +40,10 @@ export default function AdminPage() {
   const [envStatus, setEnvStatus] = useState(null)
   const [testEmail, setTestEmail] = useState('')
 
+  // Diagnostics (API/functions)
+  const [diagChecks, setDiagChecks] = useState([])
+  const [diagRunning, setDiagRunning] = useState(false)
+
   // Approvals
   const [pending, setPending] = useState([])
   const [selectedId, setSelectedId] = useState(null)
@@ -526,6 +530,8 @@ export default function AdminPage() {
   useEffect(() => {
     if (activeTab === 'env') {
       fetchEnvStatus()
+    } else if (activeTab === 'diagnostics') {
+      runDiagnostics()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab])
@@ -1319,8 +1325,12 @@ export default function AdminPage() {
           </>
         )}
 
-        {/* Banners */}
-        {activeTab === 'banners' && (
+        {/* Diagnostics */}
+        {activeTab === 'diagnostics' && (
+          <>
+           < div className="h2" style={{ marginTop: 8 }}>System Diagnosti</csdiv>
+           < div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+             < button className="btn" onClick={runDiagnostics} disabled={diagRunning}>{diagRunning ? 'Running…' : '&& (
           <>
             <div className="h2" style={{ marginTop: 8 }}>Banners</div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>

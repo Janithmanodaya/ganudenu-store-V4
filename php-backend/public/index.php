@@ -143,6 +143,7 @@ $router->add('POST', '/api/listings/payment-note', fn() => \App\Controllers\List
 
 // Admin
 $router->add('GET', '/api/admin/env-status', fn() => \App\Controllers\AdminController::envStatus(), ['rate_group' => 'ADMIN']);
+$router->add('GET', '/api/admin/diagnostics', fn() => \App\Controllers\AdminController::diagnostics(), ['rate_group' => 'ADMIN']);
 $router->add('GET', '/api/admin/config', fn() => \App\Controllers\AdminController::configGet(), ['rate_group' => 'ADMIN']);
 $router->add('POST', '/api/admin/config', fn() => \App\Controllers\AdminController::configPost(), ['rate_group' => 'ADMIN']);
 // Secure-config management
