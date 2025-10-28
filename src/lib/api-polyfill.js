@@ -1,6 +1,6 @@
 /**
  * Global API and asset polyfills for hosts without proper rewrites.
- * - fetch: if a relative /api request returns HTML (likely index.html), retry via /api/index.php?r=<path>
+ * - fetch: retry any failing/non-JSON /api/* responses via /api/index.php?r=<path> (covers 4xx/5xx and HTML fallbacks)
  * - EventSource: in production, rewrite /api/* to /api/index.php?r=<path>
  * - Image src: in production, rewrite /uploads/* to /api/index.php?r=/uploads/* to survive hosts without PHP rewrites
  * - Also upgrade same-origin http:// URLs to https:// when the page is on https (avoid mixed-content blocking)
@@ -91,12 +91,22 @@ window.fetch = async function(input, init) {
     return origFetch(input, init)
   }
 
-  // Call original
-  const resp = await origFetch(input, init).catch(() => null)
-  if (!resp) return resp
-
   // Only consider retry logic for /api/* relative same-origin requests
   const shouldCheck = isApiRelativeUrl(input)
+
+  // Call original
+  let resp = null
+  try {
+    resp = await origFetch(input, init)
+  } catch (_) {
+    // Network error: if it's an /api/* call, try front-controller once
+    if (shouldCheck) {
+      const urlStr = typeof input === 'string' ? input : (input && input.url) ? String(input.url) : ''
+      const retryUrl = buildFrontControllerUrl(urlStr)
+      try { return await origFetch(retryUrl, init) } catch { return null }
+    }
+    return null
+  }
   if (!shouldCheck) return resp
 
   // Peek into a clone to avoid consuming response body
@@ -118,8 +128,8 @@ window.fetch = async function(input, init) {
       return resp
     }
     const isHtml = trimmed.startsWith('<!DOCTYPE') || trimmed.includes('<html')
-    if (isHtml || (!resp.ok && resp.status === 200)) {
-      // Retry via front-controller
+    // Retry when HTML fallback OR any non-OK status (e.g., 502 Bad Gateway from proxies)
+    if (isHtml || !resp.ok) {
       const urlStr = typeof input === 'string' ? input : (input && input.url) ? String(input.url) : ''
       const retryUrl = buildFrontControllerUrl(urlStr)
       try {
