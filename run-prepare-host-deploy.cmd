@@ -36,10 +36,24 @@ if %errorlevel% neq 0 (
   exit /b %errorlevel%
 )
 
+REM After build: move api/ under php-backend/ to preserve original path and update rewrites
+echo [adjust] Re-rooting API folder to php-backend\api and updating .htaccess rewrites...
+if exist "%ROOT%host-deploy\api" (
+  if not exist "%ROOT%host-deploy\php-backend" (
+    mkdir "%ROOT%host-deploy\php-backend"
+  )
+  move /Y "%ROOT%host-deploy\api" "%ROOT%host-deploy\php-backend\" >nul
+)
+
+if exist "%ROOT%host-deploy\.htaccess" (
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "$p = Get-Content -Raw '%ROOT%host-deploy\.htaccess'; $p = $p -replace 'api/index.php','php-backend/api/index.php'; Set-Content -Encoding UTF8 '%ROOT%host-deploy\.htaccess' $p"
+)
+
 echo.
 echo Host deploy prepared in host-deploy\
 echo - Frontend build copied
-echo - Backend copied to host-deploy\api (vendor\ included if installed)
+echo - Backend copied to host-deploy\php-backend\api (vendor\ included if installed)
+echo - Root .htaccess rewrites /api and /uploads to php-backend/api/index.php
 echo Upload all files inside host-deploy\ to your hosting public_html.
 echo.
 endlocal
