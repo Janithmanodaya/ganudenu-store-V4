@@ -22,60 +22,62 @@ if (is_file($autoload)) {
     });
 
     // Fallback: load environment variables from .env files if present
-    (function (): void {
-        // Search order: php-backend/.env, project-root/.env, php-backend/.env.example
-        $candidates = [
-            __DIR__ . '/../.env',
-            dirname(__DIR__, 2) . '/.env',
-            __DIR__ . '/../.env.example',
-        ];
+(function (): void {
+    // Search order: php-backend/.env, project-root/.env, project-root/api/.env, php-backend/.env.example
+    // Note: Adding project-root/api/.env to support deployments that keep backend under php-backend and env in api/.env.
+    $candidates = [
+        __DIR__ . '/../.env',
+        dirname(__DIR__, 2) . '/.env',
+        dirname(__DIR__, 2) . '/api/.env',
+        __DIR__ . '/../.env.example',
+    ];
 
-        foreach ($candidates as $envFile) {
-            if (!is_file($envFile)) continue;
+    foreach ($candidates as $envFile) {
+        if (!is_file($envFile)) continue;
 
-            $lines = @file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-            if (!$lines) continue;
+        $lines = @file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        if (!$lines) continue;
 
-            foreach ($lines as $line) {
-                $line = trim($line);
-                if ($line === '' || $line[0] === '#') continue;
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if ($line === '' || $line[0] === '#') continue;
 
-                // Allow 'export KEY=val' syntax
-                if (str_starts_with($line, 'export ')) {
-                    $line = trim(substr($line, strlen('export ')));
-                }
+            // Allow 'export KEY=val' syntax
+            if (str_starts_with($line, 'export ')) {
+                $line = trim(substr($line, strlen('export ')));
+            }
 
-                $eq = strpos($line, '=');
-                if ($eq === false) continue;
+            $eq = strpos($line, '=');
+            if ($eq === false) continue;
 
-                $key = trim(substr($line, 0, $eq));
-                $val = trim(substr($line, $eq + 1));
+            $key = trim(substr($line, 0, $eq));
+            $val = trim(substr($line, $eq + 1));
 
-                // Strip surrounding quotes
-                if ($val !== '') {
-                    $first = $val[0];
-                    $last = $val[strlen($val) - 1] ?? '';
-                    if (($first === '"' && $last === '"') || ($first === "'" && $last === "'")) {
-                        $val = substr($val, 1, -1);
-                    }
-                }
-
-                // Basic variable expansion: ${KEY} -> existing env
-                $val = preg_replace_callback('/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/', function ($m) {
-                    $k = $m[1];
-                    $v = getenv($k);
-                    return $v !== false ? $v : '';
-                }, $val);
-
-                // Only set if not already set to avoid overwriting explicitly provided env
-                $existing = getenv($key);
-                if ($existing === false || $existing === '') {
-                    putenv("{$key}={$val}");
-                    $_ENV[$key] = $val;
+            // Strip surrounding quotes
+            if ($val !== '') {
+                $first = $val[0];
+                $last = $val[strlen($val) - 1] ?? '';
+                if (($first === '"' && $last === '"') || ($first === "'" && $last === "'")) {
+                    $val = substr($val, 1, -1);
                 }
             }
+
+            // Basic variable expansion: ${KEY} -> existing env
+            $val = preg_replace_callback('/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/', function ($m) {
+                $k = $m[1];
+                $v = getenv($k);
+                return $v !== false ? $v : '';
+            }, $val);
+
+            // Only set if not already set to avoid overwriting explicitly provided env
+            $existing = getenv($key);
+            if ($existing === false || $existing === '') {
+                putenv("{$key}={$val}");
+                $_ENV[$key] = $val;
+            }
         }
-    })();
+    }
+})();
 }
 
 date_default_timezone_set('UTC');

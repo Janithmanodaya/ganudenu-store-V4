@@ -175,12 +175,32 @@ function copyPhpBackend() {
 }
 
 function writeApiEnv() {
-  // To avoid phpdotenv escape parsing on Windows backslashes, always write forward slashes
-  // and use single quotes (phpdotenv treats single-quoted values literally).
+  const envPath = path.join(API_OUT, '.env');
+  const useExisting = process.env.DEPLOY_USE_EXISTING_ENV === '1';
+
+  // If requested, prefer copying an existing env from project-root/api/.env or php-backend/.env
+  if (useExisting) {
+    const candidates = [
+      path.join(ROOT, 'api', '.env'),
+      path.join(PHP_BACKEND, '.env'),
+    ];
+    for (const src of candidates) {
+      if (fs.existsSync(src)) {
+        try { fs.unlinkSync(envPath); } catch {}
+        copyFile(src, envPath);
+        log(`Copied existing env file to ${envPath} from ${src}`);
+        return;
+      }
+    }
+    log('DEPLOY_USE_EXISTING_ENV=1 set but no existing env found. Falling back to generated env.');
+  }
+
+  // Generate a minimal production-safe env
+  // Use forward slashes and single quotes to avoid phpdotenv escapes on Windows.
   const toPosix = (p) => p.replace(/\\\\/g, '/');
   const DB_PATH = toPosix(path.join(API_VAR, 'ganudenu.sqlite'));
   const UPLOADS = toPosix(API_UPLOADS);
-  const ORIGIN = 'https://ganudenu.store';
+  const ORIGIN = process.env.DEPLOY_PUBLIC_ORIGIN || 'https://ganudenu.store';
   const lines = [
     `APP_ENV='production'`,
     `PUBLIC_DOMAIN='${ORIGIN}'`,
@@ -189,14 +209,10 @@ function writeApiEnv() {
     `DB_PATH='${DB_PATH}'`,
     `UPLOADS_PATH='${UPLOADS}'`,
     `CORS_ORIGINS='${ORIGIN}'`,
-    // Admin email default is already handled in code; set if you want:
-    // `ADMIN_EMAIL='janithmanodaya2002@gmail.com'`,
-    // `ADMIN_PASSWORD='change_me'`,
   ];
-  const envPath = path.join(API_OUT, '.env');
   try { fs.unlinkSync(envPath); } catch {}
   fs.writeFileSync(envPath, lines.join('\n') + '\n', 'utf8');
-  log(`Wrote ${envPath} with DB_PATH=${DB_PATH} and UPLOADS_PATH=${UPLOADS}`);
+  log(`Wrote generated ${envPath} with DB_PATH=${DB_PATH} and UPLOADS_PATH=${UPLOADS}`);
 }
 
 function fixApiIndexRequire() {
