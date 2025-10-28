@@ -96,6 +96,7 @@
 
         var man = await tryFetchManifest('manifest.json');
         if (!man) man = await tryFetchManifest('assets/manifest.json');
+        if (!man) man = await tryFetchManifest('.vite/manifest.json');
         if (!man) throw new Error('manifest missing');
 
         // Prefer known keys
