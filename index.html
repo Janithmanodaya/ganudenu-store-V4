@@ -50,7 +50,7 @@
   <body>
     <div id="root"></div>
 
-    <!-- Loader: dev uses Vite's /src/main.jsx, prod loads built asset via manifest -->
+    <!-- Loader: try built assets first, then dev fallback. Avoid false dev detection on hosts that rewrite unknown paths to index.html -->
     <script>
     (function () {
       function loadModule(src) {
@@ -60,42 +60,91 @@
         document.body.appendChild(s);
       }
 
-      async function isViteDev() {
+      function injectCss(hrefs) {
         try {
-          // Vite dev server exposes /@vite/client
-          const r = await fetch('/@vite/client', { method: 'HEAD' });
-          return r && r.ok;
+          if (!Array.isArray(hrefs)) return;
+          for (var i = 0; i < hrefs.length; i++) {
+            var href = hrefs[i];
+            if (!href) continue;
+            var l = document.createElement('link');
+            l.rel = 'stylesheet';
+            l.href = href.startsWith('/') ? href : '/' + href;
+            document.head.appendChild(l);
+          }
+        } catch (_) {}
+      }
+
+      async function loadBuiltViaManifest() {
+        const r = await fetch('/assets/manifest.json', { cache: 'no-store' });
+        if (!r.ok) throw new Error('manifest missing');
+        const man = await r.json();
+        // Prefer known keys
+        var keys = ['src/main.jsx', 'src/main.tsx', 'src/main.js'];
+        var entry = null;
+        var css = null;
+        for (var i = 0; i < keys.length; i++) {
+          var k = keys[i];
+          if (man[k] && man[k].file) {
+            entry = man[k].file;
+            css = man[k].css || null;
+            break;
+          }
+        }
+        if (!entry) {
+          // Fallback: first object with a .js file
+          for (var k in man) {
+            var v = man[k];
+            if (v && typeof v === 'object' && v.file && String(v.file).endsWith('.js')) {
+              entry = v.file;
+              css = v.css || null;
+              break;
+            }
+          }
+        }
+        if (!entry) throw new Error('entry not found');
+        if (css && css.length) injectCss(css);
+        return '/' + String(entry).replace(/^\/+/, '');
+      }
+
+      async function isDevServer() {
+        try {
+          const r = await fetch('/@vite/client', { cache: 'no-store' });
+          if (!r.ok) return false;
+          const ct = String(r.headers.get('content-type') || '').toLowerCase();
+          if (!ct.includes('javascript')) return false;
+          const txt = await r.text();
+          return txt.includes('import.meta.hot') || txt.includes('vite');
         } catch (_) {
           return false;
         }
       }
 
       (async function () {
-        const dev = await isViteDev();
+        try {
+          // Try production build first
+          var entry = await loadBuiltViaManifest();
+          loadModule(entry);
+          return;
+        } catch (_) {
+          // no manifest or not deployed
+        }
+        // Dev fallback only on localhost or real dev server
+        if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
+          loadModule('/src/main.jsx');
+          return;
+        }
+        const dev = await isDevServer();
         if (dev) {
           loadModule('/src/main.jsx');
           return;
         }
-        try {
-          const r = await fetch('/assets/manifest.json', { cache: 'no-store' });
-          if (!r.ok) throw new Error('manifest missing');
-          const man = await r.json();
-          let entry = (man && man['src/main.jsx'] && man['src/main.jsx'].file) ? man['src/main.jsx'].file : null;
-          if (!entry && man) {
-            for (const k in man) {
-              const v = man[k];
-              if (v && typeof v === 'object' && v.file && String(v.file).endsWith('.js')) { entry = v.file; break; }
-            }
-          }
-          if (!entry) throw new Error('entry not found');
-          loadModule('/' + String(entry).replace(/^\/+/, ''));
-        } catch (e) {
-          console.error('Build assets missing or manifest not found.', e);
-          var msg = document.createElement('div');
-          msg.style.cssText = 'padding:12px;margin:12px;background:#0b1220;color:#fff;border:1px solid #223;font-family:system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;';
-          msg.textContent = 'Build assets not found. Please deploy host-deploy/ (run run-prepare-host-deploy.cmd or prepare-host-deploy.sh) or upload dist/.';
-          document.body.appendChild(msg);
-        }
+
+        // Final fallback: show helpful message
+        var msg = document.createElement('div');
+        msg.style.cssText = 'padding:12px;margin:12px;background:#0b1220;color:#fff;border:1px solid #223;font-family:system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;';
+        msg.textContent = 'App bundle not found. Please deploy host-deploy/ (run run-prepare-host-deploy.cmd or prepare-host-deploy.sh) and upload dist/assets.';
+        document.body.appendChild(msg);
+        console.error('Manifest not found and Vite dev server not detected.');
       })();
     })();
     </script>
