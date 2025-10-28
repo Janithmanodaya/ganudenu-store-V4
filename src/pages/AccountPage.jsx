@@ -19,29 +19,74 @@ export default function AccountPage() {
   const [profileStatus, setProfileStatus] = useState(null)
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem('user')
-      if (!raw) {
-        navigate('/auth', { replace: true })
-        return
-      }
-      const u = JSON.parse(raw)
-      setUser(u)
-      setUsername(u?.username || '')
-      // Load favorites
-      const key = `favorites_${u.email}`
-      const arr = JSON.parse(localStorage.getItem(key) || '[]')
-      setFavorites(Array.isArray(arr) ? arr : [])
+    (async () => {
+      try {
+        const raw = localStorage.getItem('user')
+        if (!raw) {
+          // Try to recover from server status (cookie-auth) before redirecting
+          try {
+            const r = await fetch('/api/auth/status', { credentials: 'include', headers: { 'Accept': 'application/json' } })
+            if (r.ok) {
+              const s = await r.json().catch(() => ({}))
+              if (s && s.email) {
+                const recovered = { email: s.email, username: s.username || null, is_admin: !!s.is_admin }
+                localStorage.setItem('user', JSON.stringify(recovered))
+                setUser(recovered)
+                setUsername(recovered.username || '')
+                const key = `favorites_${recovered.email}`
+                const arr = JSON.parse(localStorage.getItem(key) || '[]')
+                setFavorites(Array.isArray(arr) ? arr : [])
+                await loadSellerProfile(recovered)
+                return
+              }
+            }
+          } catch (_) {}
+          navigate('/auth', { replace: true })
+          return
+        }
+        const u = JSON.parse(raw)
+        // If stored user has no email, attempt recovery via status endpoint
+        if (!u || !u.email) {
+          try {
+            const tok = localStorage.getItem('auth_token') || ''
+            const hdrs = tok ? { Authorization: 'Bearer ' + tok, Accept: 'application/json' } : { Accept: 'application/json' }
+            const r = await fetch('/api/auth/status', { credentials: 'include', headers: hdrs })
+            if (r.ok) {
+              const s = await r.json().catch(() => ({}))
+              if (s && s.email) {
+                const recovered = { email: s.email, username: s.username || null, is_admin: !!s.is_admin }
+                localStorage.setItem('user', JSON.stringify(recovered))
+                setUser(recovered)
+                setUsername(recovered.username || '')
+                const key = `favorites_${recovered.email}`
+                const arr = JSON.parse(localStorage.getItem(key) || '[]')
+                setFavorites(Array.isArray(arr) ? arr : [])
+                await loadSellerProfile(recovered)
+                return
+              }
+            }
+          } catch (_) {}
+          navigate('/auth', { replace: true })
+          return
+        }
+        setUser(u)
+        setUsername(u?.username || '')
+        // Load favorites
+        const key = `favorites_${u.email}`
+        const arr = JSON.parse(localStorage.getItem(key) || '[]')
+        setFavorites(Array.isArray(arr) ? arr : [])
 
-      // Load seller profile
-      loadSellerProfile(u)
-    } catch (_) {
-      navigate('/auth', { replace: true })
-    }
+        // Load seller profile
+        await loadSellerProfile(u)
+      } catch (_) {
+        navigate('/auth', { replace: true })
+      }
+    })()
   }, [navigate])
 
   async function loadSellerProfile(u) {
     try {
+      if (!u || !u.email) return
       setProfileStatus(null)
       const r = await fetch(`/api/users/profile?email=${encodeURIComponent(u.email)}`)
       const data = await r.json()
