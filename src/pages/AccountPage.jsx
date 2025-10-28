@@ -43,8 +43,24 @@ export default function AccountPage() {
   async function loadSellerProfile(u) {
     try {
       setProfileStatus(null)
-      const r = await fetch(`/api/users/profile?email=${encodeURIComponent(u.email)}`)
-      const data = await r.json()
+      // Build robust request: prefer Bearer token; else X-User-Email; else query param
+      let url = '/api/users/profile'
+      const headers = { Accept: 'application/json' }
+      try {
+        const tok = localStorage.getItem('auth_token') || ''
+        if (tok) {
+          headers.Authorization = 'Bearer ' + tok
+        } else if (u && u.email) {
+          headers['X-User-Email'] = u.email
+        } else if (u && u.email) {
+          url = `/api/users/profile?email=${encodeURIComponent(u.email)}`
+        }
+      } catch (_) {
+        if (u && u.email) url = `/api/users/profile?email=${encodeURIComponent(u.email)}`
+      }
+
+      const r = await fetch(url, { headers })
+      const data = await r.json().catch(() => ({}))
       if (r.ok) {
         const p = data?.profile || {}
         setProfile({

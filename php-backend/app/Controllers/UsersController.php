@@ -21,7 +21,28 @@ class UsersController
     public static function profileGet(): void
     {
         try {
-            $handle = strtolower(trim((string)($_GET['username'] ?? ($_GET['email'] ?? ''))));
+            // Accept username or email; if missing/undefined, fallback to auth token or header
+            $raw = (string)($_GET['username'] ?? ($_GET['email'] ?? ''));
+            $handle = strtolower(trim($raw));
+            if ($handle === '' || $handle === 'undefined' || $handle === 'null') {
+                // Try Bearer token or auth_token cookie
+                $tok = \App\Services\JWT::getBearerToken();
+                if (!$tok && isset($_COOKIE['auth_token'])) {
+                    $tok = (string)$_COOKIE['auth_token'];
+                }
+                if ($tok) {
+                    $v = \App\Services\JWT::verify($tok);
+                    if ($v['ok'] && !empty($v['decoded']['email'])) {
+                        $handle = strtolower(trim((string)$v['decoded']['email']));
+                    }
+                }
+                // Fallback to X-User-Email header
+                if ($handle === '' || $handle === 'undefined' || $handle === 'null') {
+                    $hdr = strtolower(trim((string)($_SERVER['HTTP_X_USER_EMAIL'] ?? '')));
+                    if ($hdr !== '') $handle = $hdr;
+                }
+            }
+
             $user = self::findUser($handle);
             if (!$user) { \json_response(['error' => 'Seller not found'], 404); return; }
             $photo_url = !empty($user['profile_photo_path']) ? ('/uploads/' . basename($user['profile_photo_path'])) : null;

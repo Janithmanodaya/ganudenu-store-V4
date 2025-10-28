@@ -201,6 +201,10 @@ function writeApiEnv() {
     `DB_PATH='${DB_PATH}'`,
     `UPLOADS_PATH='${UPLOADS}'`,
     `CORS_ORIGINS='${ORIGIN}'`,
+    // Email: default to dev mode on shared hosts so OTP flows don't 502 when SMTP is not configured.
+    // Set EMAIL_DEV_MODE='false' and configure SMTP_* or BREVO_* for production email sending.
+    `EMAIL_DEV_MODE='true'`,
+    `SMTP_FROM='no-reply@${new URL(ORIGIN).hostname}'`,
     // Admin email default is already handled in code; set if you want:
     // `ADMIN_EMAIL='janithmanodaya2002@gmail.com'`,
     // `ADMIN_PASSWORD='change_me'`,

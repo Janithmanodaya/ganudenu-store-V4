@@ -32,9 +32,6 @@
     <link rel="preconnect" href="https://ganudenu.store" crossorigin />
     <link rel="dns-prefetch" href="https://ganudenu.store" />
 
-    <!-- Preload app entry to reduce FCP -->
-    <link rel="modulepreload" href="/src/main.jsx" />
-
     <!-- JSON-LD: WebSite with SearchAction -->
     <script type="application/ld+json">
     {
@@ -52,6 +49,126 @@
   </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
+
+    <!-- Loader: try built assets first, then dev fallback. Avoid false dev detection on hosts that rewrite unknown paths to index.html -->
+    <script>
+    (function () {
+      function loadModule(src) {
+        var s = document.createElement('script');
+        s.type = 'module';
+        s.src = src;
+        document.body.appendChild(s);
+      }
+
+      function injectCss(hrefs) {
+        try {
+          if (!Array.isArray(hrefs)) return;
+          for (var i = 0; i < hrefs.length; i++) {
+            var href = hrefs[i];
+            if (!href) continue;
+            var l = document.createElement('link');
+            l.rel = 'stylesheet';
+            // Resolve relative to current page (works in subfolders)
+            l.href = new URL(href, window.location.href).toString();
+            document.head.appendChild(l);
+          }
+        } catch (_) {}
+      }
+
+      async function loadBuiltViaManifest() {
+        // Try common manifest locations, resolved relative to current page to support subfolder deployments
+        async function tryFetchManifest(rel) {
+          try {
+            const url = new URL(rel, window.location.href).toString();
+            const r = await fetch(url, { cache: 'no-store' });
+            if (!r.ok) return null;
+            const ct = String(r.headers.get('content-type') || '').toLowerCase();
+            // Some hosts mislabel content-type; attempt to parse regardless
+            const text = await r.text();
+            try {
+              return JSON.parse(text);
+            } catch (_) {
+              // If mislabelled but valid JSON, we would have parsed above. Return null on HTML/invalid.
+              return null;
+            }
+          } catch (_) { return null; }
+        }
+
+        var man = await tryFetchManifest('manifest.json');
+        if (!man) man = await tryFetchManifest('assets/manifest.json');
+        if (!man) man = await tryFetchManifest('.vite/manifest.json');
+        if (!man) throw new Error('manifest missing');
+
+        // Prefer known keys
+        var keys = ['src/main.jsx', 'src/main.tsx', 'src/main.js'];
+        var entry = null;
+        var css = null;
+        for (var i = 0; i < keys.length; i++) {
+          var k = keys[i];
+          if (man[k] && man[k].file) {
+            entry = man[k].file;
+            css = man[k].css || null;
+            break;
+          }
+        }
+        if (!entry) {
+          // Fallback: first object with a .js file
+          for (var k in man) {
+            var v = man[k];
+            if (v && typeof v === 'object' && v.file && String(v.file).endsWith('.js')) {
+              entry = v.file;
+              css = v.css || null;
+              break;
+            }
+          }
+        }
+        if (!entry) throw new Error('entry not found');
+        if (css && css.length) injectCss(css);
+        // Resolve entry relative to current page
+        return new URL(String(entry), window.location.href).toString();
+      }
+
+      async function isDevServer() {
+        try {
+          const r = await fetch('/@vite/client', { cache: 'no-store' });
+          if (!r.ok) return false;
+          const ct = String(r.headers.get('content-type') || '').toLowerCase();
+          if (!ct.includes('javascript')) return false;
+          const txt = await r.text();
+          return txt.includes('import.meta.hot') || txt.includes('vite');
+        } catch (_) {
+          return false;
+        }
+      }
+
+      (async function () {
+        try {
+          // Try production build first
+          var entry = await loadBuiltViaManifest();
+          loadModule(entry);
+          return;
+        } catch (_) {
+          // no manifest or not deployed
+        }
+        // Dev fallback only on localhost or real dev server
+        if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
+          loadModule('/src/main.jsx');
+          return;
+        }
+        const dev = await isDevServer();
+        if (dev) {
+          loadModule('/src/main.jsx');
+          return;
+        }
+
+        // Final fallback: show helpful message
+        var msg = document.createElement('div');
+        msg.style.cssText = 'padding:12px;margin:12px;background:#0b1220;color:#fff;border:1px solid #223;font-family:system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;';
+        msg.textContent = 'App bundle not found. Please deploy host-deploy/ (run run-prepare-host-deploy.cmd or prepare-host-deploy.sh) and upload dist/assets.';
+        document.body.appendChild(msg);
+        console.error('Manifest not found and Vite dev server not detected.');
+      })();
+    })();
+    </script>
   </body>
 </html>
