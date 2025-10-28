@@ -68,30 +68,34 @@
             if (!href) continue;
             var l = document.createElement('link');
             l.rel = 'stylesheet';
-            l.href = href.startsWith('/') ? href : '/' + href;
+            // Resolve relative to current page (works in subfolders)
+            l.href = new URL(href, window.location.href).toString();
             document.head.appendChild(l);
           }
         } catch (_) {}
       }
 
       async function loadBuiltViaManifest() {
-        // Vite writes manifest.json at the build root by default (e.g., /manifest.json).
-        // Some setups may place it under /assets/manifest.json. Try both.
-        async function tryFetchManifest(url) {
+        // Try common manifest locations, resolved relative to current page to support subfolder deployments
+        async function tryFetchManifest(rel) {
           try {
+            const url = new URL(rel, window.location.href).toString();
             const r = await fetch(url, { cache: 'no-store' });
             if (!r.ok) return null;
             const ct = String(r.headers.get('content-type') || '').toLowerCase();
-            if (!ct.includes('json')) {
-              // Still attempt to parse; some hosts mislabel content-type
+            // Some hosts mislabel content-type; attempt to parse regardless
+            const text = await r.text();
+            try {
+              return JSON.parse(text);
+            } catch (_) {
+              // If mislabelled but valid JSON, we would have parsed above. Return null on HTML/invalid.
+              return null;
             }
-            const man = await r.json().catch(() => null);
-            return man || null;
           } catch (_) { return null; }
         }
 
-        var man = await tryFetchManifest('/manifest.json');
-        if (!man) man = await tryFetchManifest('/assets/manifest.json');
+        var man = await tryFetchManifest('manifest.json');
+        if (!man) man = await tryFetchManifest('assets/manifest.json');
         if (!man) throw new Error('manifest missing');
 
         // Prefer known keys
@@ -119,7 +123,8 @@
         }
         if (!entry) throw new Error('entry not found');
         if (css && css.length) injectCss(css);
-        return '/' + String(entry).replace(/^\/+/, '');
+        // Resolve entry relative to current page
+        return new URL(String(entry), window.location.href).toString();
       }
 
       async function isDevServer() {
