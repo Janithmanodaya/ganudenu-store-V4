@@ -192,7 +192,10 @@ function writeApiEnv() {
   const toPosix = (p) => p.replace(/\\\\/g, '/');
   const DB_PATH = toPosix(path.join(API_VAR, 'ganudenu.sqlite'));
   const UPLOADS = toPosix(API_UPLOADS);
-  const ORIGIN = 'https://ganudenu.store';
+  // Allow overriding the public origin for correct cookies/CORS on non-ganudenu.store domains
+  // e.g. set HOST_DEPLOY_ORIGIN=ganudenu.hstn.me (or full https://domain)
+  const rawOrigin = process.env.HOST_DEPLOY_ORIGIN || 'https://ganudenu.store';
+  const ORIGIN = rawOrigin.startsWith('http') ? rawOrigin : `https://${rawOrigin}`;
   const lines = [
     `APP_ENV='production'`,
     `PUBLIC_DOMAIN='${ORIGIN}'`,
@@ -211,8 +214,8 @@ function writeApiEnv() {
   ];
   const envPath = path.join(API_OUT, '.env');
   try { fs.unlinkSync(envPath); } catch {}
-  fs.writeFileSync(envPath, lines.join('\n') + '\n', 'utf8');
-  log(`Wrote ${envPath} with DB_PATH=${DB_PATH} and UPLOADS_PATH=${UPLOADS}`);
+  fs.writeFileSync(envPath, lines.join('\\n') + '\\n', 'utf8');
+  log(`Wrote ${envPath} with DB_PATH=${DB_PATH} and UPLOADS_PATH=${UPLOADS} and PUBLIC_ORIGIN=${ORIGIN}`);
 }
 
 function fixApiIndexRequire() {
