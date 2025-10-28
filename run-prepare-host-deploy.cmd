@@ -30,8 +30,11 @@ if %errorlevel% neq 0 (
 )
 
 echo [build] Building frontend and preparing host-deploy...
-set BACKEND_DIR=php-backend
-echo [config] Using backend output folder: %BACKEND_DIR% (PUBLIC_API_ROUTE=/api)
+REM Use 'api' as backend output folder to avoid relying on .htaccess rewrites.
+REM This creates host-deploy\api\index.php so /api/index.php works on any host.
+set BACKEND_DIR=api
+set PUBLIC_API_ROUTE=/api
+echo [config] Using backend output folder: %BACKEND_DIR% (PUBLIC_API_ROUTE=%PUBLIC_API_ROUTE%)
 node "%ROOT%scripts\prepare-host-deploy.js"
 if %errorlevel% neq 0 (
   echo [error] Failed to prepare host deploy.
@@ -40,8 +43,9 @@ if %errorlevel% neq 0 (
 
 echo.
 echo Host deploy prepared in host-deploy\
-echo - Frontend build copied
+echo - Frontend build copied (assets\ + manifest.json)
 echo - Backend copied to host-deploy\%BACKEND_DIR% (vendor\ included if installed)
-echo Upload all files inside host-deploy\ to your hosting public_html.
+echo Upload ALL files inside host-deploy\ to your hosting public_html.
+echo Ensure %BACKEND_DIR%\var and %BACKEND_DIR%\var\uploads are writable (755/775).
 echo.
 endlocal
