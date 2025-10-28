@@ -527,6 +527,56 @@ export default function AdminPage() {
       setStatus(`Error: ${e.message}`)
     }
   }
+
+  // System diagnostics runner
+  async function runDiagnostics() {
+    try {
+      setDiagRunning(true)
+      setDiagChecks([])
+      const checks = []
+      async function check(name, fn) {
+        try {
+          await fn()
+          checks.push({ name, ok: true })
+        } catch (e) {
+          checks.push({ name, ok: false, message: e?.message || String(e) })
+        }
+        setDiagChecks([...checks])
+      }
+
+      await check('Health endpoint', async () => {
+        const r = await fetch('/api/health', { cache: 'no-store' })
+        if (!r.ok) throw new Error(`Status ${r.status}`)
+        const d = await safeJson(r)
+        if (!d || (d.ok === false && !d.status)) throw new Error('Unexpected response')
+      })
+
+      await check('Admin config endpoint', async () => {
+        const r = await fetch('/api/admin/config', { headers: getAdminHeaders(), cache: 'no-store' })
+        if (!r.ok) {
+          const d = await safeJson(r)
+          throw new Error(d.error || `Status ${r.status}`)
+        }
+      })
+
+      await check('Banners list', async () => {
+        const r = await fetch('/api/admin/banners', { headers: getAdminHeaders(), cache: 'no-store' })
+        if (!r.ok) throw new Error(`Status ${r.status}`)
+      })
+
+      await check('Notifications list', async () => {
+        const r = await fetch('/api/admin/notifications', { headers: getAdminHeaders(), cache: 'no-store' })
+        if (!r.ok) throw new Error(`Status ${r.status}`)
+      })
+
+      setStatus('Diagnostics complete.')
+    } catch (_) {
+      // status already set per check
+    } finally {
+      setDiagRunning(false)
+    }
+  }
+
   useEffect(() => {
     if (activeTab === 'env') {
       fetchEnvStatus()
@@ -1325,12 +1375,8 @@ export default function AdminPage() {
           </>
         )}
 
-        {/* Diagnostics */}
-        {activeTab === 'diagnostics' && (
-          <>
-           < div className="h2" style={{ marginTop: 8 }}>System Diagnosti</csdiv>
-           < div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-             < button className="btn" onClick={runDiagnostics} disabled={diagRunning}>{diagRunning ? 'Running…' : '&& (
+        {/* Banners */}
+        {activeTab === 'banners' && (
           <>
             <div className="h2" style={{ marginTop: 8 }}>Banners</div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -1348,6 +1394,29 @@ export default function AdminPage() {
                   </div>
                 </div>
               ))}
+            </div>
+          </>
+        )}
+
+        {/* Diagnostics */}
+        {activeTab === 'diagnostics' && (
+          <>
+            <div className="h2" style={{ marginTop: 8 }}>System Diagnostics</div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <button className="btn" onClick={runDiagnostics} disabled={diagRunning}>{diagRunning ? 'Running…' : 'Run diagnostics'}</button>
+            </div>
+            <div className="card" style={{ marginTop: 8 }}>
+              {diagChecks.length === 0 && <p className="text-muted">No checks run yet.</p>}
+              {diagChecks.length > 0 && (
+                <div>
+                  {diagChecks.map((c, i) => (
+                    <div key={i} className="card" style={{ marginBottom: 8, background: c.ok ? 'rgba(52,211,153,0.08)' : 'rgba(239,68,68,0.08)', borderColor: c.ok ? '#34d3991a' : '#ef44441a' }}>
+                      <div><strong>{c.name}</strong> — {c.ok ? 'OK' : 'Failed'}</div>
+                      {!c.ok && <div className="text-muted">{c.message || ''}</div>}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </>
         )}
