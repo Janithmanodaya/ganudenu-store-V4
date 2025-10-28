@@ -11,7 +11,8 @@
     "start": "node server/index.js",
     "test": "vitest run",
     "health": "vitest run server/tests/health.spec.js",
-    "health:full": "vitest run server/tests/health.spec.js server/tests/auth.spec.js server/tests/health_auth.spec.js"
+    "health:full": "vitest run server/tests/health.spec.js server/tests/auth.spec.js server/tests/health_auth.spec.js",
+    "health:php": "node scripts/health-check-php.js"
   },
   "dependencies": {
     "@sendinblue/client": "^3.3.1",
