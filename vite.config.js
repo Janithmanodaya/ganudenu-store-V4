@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import path from 'path'
 
 /**
  * Dev helper: serve a local fallback for /api/maintenance-status when the backend isn't running.
@@ -74,6 +75,17 @@ export default defineConfig({
       '/uploads': {
         target: 'http://localhost:5174',
         changeOrigin: true
+      }
+    }
+  },
+  build: {
+    // Generate manifest so index.html loader can find the built entry
+    manifest: true,
+    rollupOptions: {
+      // Ensure the app entry is included in the build even if index.html doesn't reference it directly
+      input: {
+        index: path.resolve(__dirname, 'index.html'),
+        app: path.resolve(__dirname, 'src/main.jsx')
       }
     }
   }

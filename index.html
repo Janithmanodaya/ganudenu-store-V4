@@ -32,9 +32,6 @@
     <link rel="preconnect" href="https://ganudenu.store" crossorigin />
     <link rel="dns-prefetch" href="https://ganudenu.store" />
 
-    <!-- Preload app entry to reduce FCP -->
-    <link rel="modulepreload" href="/src/main.jsx" />
-
     <!-- JSON-LD: WebSite with SearchAction -->
     <script type="application/ld+json">
     {
@@ -52,6 +49,55 @@
   </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
+
+    <!-- Loader: dev uses Vite's /src/main.jsx, prod loads built asset via manifest -->
+    <script>
+    (function () {
+      function loadModule(src) {
+        var s = document.createElement('script');
+        s.type = 'module';
+        s.src = src;
+        document.body.appendChild(s);
+      }
+
+      async function isViteDev() {
+        try {
+          // Vite dev server exposes /@vite/client
+          const r = await fetch('/@vite/client', { method: 'HEAD' });
+          return r && r.ok;
+        } catch (_) {
+          return false;
+        }
+      }
+
+      (async function () {
+        const dev = await isViteDev();
+        if (dev) {
+          loadModule('/src/main.jsx');
+          return;
+        }
+        try {
+          const r = await fetch('/assets/manifest.json', { cache: 'no-store' });
+          if (!r.ok) throw new Error('manifest missing');
+          const man = await r.json();
+          let entry = (man && man['src/main.jsx'] && man['src/main.jsx'].file) ? man['src/main.jsx'].file : null;
+          if (!entry && man) {
+            for (const k in man) {
+              const v = man[k];
+              if (v && typeof v === 'object' && v.file && String(v.file).endsWith('.js')) { entry = v.file; break; }
+            }
+          }
+          if (!entry) throw new Error('entry not found');
+          loadModule('/' + String(entry).replace(/^\/+/, ''));
+        } catch (e) {
+          console.error('Build assets missing or manifest not found.', e);
+          var msg = document.createElement('div');
+          msg.style.cssText = 'padding:12px;margin:12px;background:#0b1220;color:#fff;border:1px solid #223;font-family:system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;';
+          msg.textContent = 'Build assets not found. Please deploy host-deploy/ (run run-prepare-host-deploy.cmd or prepare-host-deploy.sh) or upload dist/.';
+          document.body.appendChild(msg);
+        }
+      })();
+    })();
+    </script>
   </body>
 </html>
