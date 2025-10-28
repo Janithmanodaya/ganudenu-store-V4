@@ -45,14 +45,18 @@ class MiniMap
 
     private static function listFiles(string $root): array
     {
-        // Enumerate a safe subset of files (skip node_modules, vendor, .git, uploads)
+        // Enumerate a safe subset of files (skip vendor, var, node_modules, .git, uploads, databases, tests, scripts)
         $skipDirs = [
             '/node_modules/',
             '/.git/',
-            '/php-backend/vendor/',
-            '/php-backend/public/var/',
-            '/php-backend/database/',
-            '/php-backend/tests/',
+            '/vendor/',
+            '/public/var/',
+            '/var/',
+            '/database/',
+            '/tests/',
+            '/nginx/',
+            '/scripts/',
+            '/reports/',
         ];
         $uploads = self::uploadsBase()['path'];
         $filters = ['php','js','ts','jsx','tsx','json','yaml','yml','md','html','css','sh','cmd','ps1','bat','conf','ini'];

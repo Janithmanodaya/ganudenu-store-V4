@@ -1,9 +1,11 @@
-# One-click health check runner (PowerShell)
+# One-click PHP backend health check runner (PowerShell)
 param(
+  [string]$Target = "http://localhost",
   [switch]$SkipInstall
 )
 
-Write-Host "Health check runner (PowerShell)" -ForegroundColor Cyan
+Write-Host "PHP backend health check runner (PowerShell)" -ForegroundColor Cyan
+Write-Host "Target: $Target" -ForegroundColor Yellow
 
 # Prepare report directory and file
 $reportDir = "data/health-reports"
@@ -14,6 +16,7 @@ $ts = Get-Date -Format "yyyyMMdd_HHmmss"
 $reportFile = Join-Path $reportDir "health_$ts.txt"
 
 "Health check started at $(Get-Date)" | Out-File -FilePath $reportFile -Encoding utf8
+"Target: $Target" | Out-File -FilePath $reportFile -Append -Encoding utf8
 
 # Verify npm is available
 $npmPath = (Get-Command npm -ErrorAction SilentlyContinue).Path
@@ -43,10 +46,12 @@ if (-not $SkipInstall) {
   "Skipping npm install..." | Out-File -FilePath $reportFile -Append -Encoding utf8
 }
 
-Write-Host "Running full health checks (public + authenticated)..." -ForegroundColor Green
-"Running full health checks (public + authenticated)..." | Out-File -FilePath $reportFile -Append -Encoding utf8
+Write-Host "Running PHP backend health checks..." -ForegroundColor Green
+"Running PHP backend health checks..." | Out-File -FilePath $reportFile -Append -Encoding utf8
 
-& $npmPath run health:full 2>&1 | ForEach-Object {
+# Pass TARGET via env to npm script
+$env:TARGET = $Target
+& $npmPath run health:php 2>&1 | ForEach-Object {
   $_
   $_ | Out-File -FilePath $reportFile -Append -Encoding utf8
 }

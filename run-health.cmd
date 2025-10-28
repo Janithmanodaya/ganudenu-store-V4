@@ -1,6 +1,17 @@
 @echo off
-REM One-click health check runner (Windows CMD)
+REM One-click PHP backend health check runner (Windows CMD)
+REM Usage: run-health.cmd [https://your-domain.com]
 SETLOCAL ENABLEDELAYEDEXPANSION
+
+REM Determine TARGET from arg or env
+set "TARGET_ARG=%~1"
+if not "%TARGET_ARG%"=="" (
+  set "TARGET=%TARGET_ARG%"
+) else (
+  if "%TARGET%"=="" (
+    set "TARGET=http://localhost"
+  )
+)
 
 REM Prepare report directory and file
 set "REPORT_DIR=data\health-reports"
@@ -12,6 +23,7 @@ for /f %%i in ('powershell -NoProfile -Command "(Get-Date).ToString('yyyyMMdd_HH
 set "REPORT_FILE=%REPORT_DIR%\health_!TS!.txt"
 
 echo Health check started at !DATE! !TIME! > "!REPORT_FILE!"
+echo Target: %TARGET%>> "!REPORT_FILE!"
 echo Report file: "!REPORT_FILE!"
 echo.
 
@@ -40,9 +52,10 @@ if not "!NPM_INSTALL_CODE!"=="0" (
 )
 
 echo.>> "!REPORT_FILE!"
-echo Running full health checks (public + authenticated)...
-echo Running full health checks (public + authenticated)...>> "!REPORT_FILE!"
-powershell -NoProfile -Command "npm run health:full 2>&1 ^| ForEach-Object { $_; $_ ^| Out-File -FilePath '%REPORT_FILE%' -Append -Encoding utf8 }; exit $LASTEXITCODE"
+echo Running PHP backend health checks against %TARGET%...
+echo Running PHP backend health checks against %TARGET%...>> "!REPORT_FILE!"
+REM Pass TARGET via env to npm script
+powershell -NoProfile -Command "$env:TARGET='%TARGET%'; npm run health:php 2>&1 ^| ForEach-Object { $_; $_ ^| Out-File -FilePath '%REPORT_FILE%' -Append -Encoding utf8 }; exit $LASTEXITCODE"
 set "TEST_EXIT_CODE=%ERRORLEVEL%"
 
 echo.>> "!REPORT_FILE!"
