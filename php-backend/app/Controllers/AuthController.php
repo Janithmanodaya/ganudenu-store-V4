@@ -1013,7 +1013,7 @@ class AuthController
             return;
         }
         if (!empty($sent['simulated'])) {
-            \json_response(['ok' => true, 'message' => 'OTP generated (no email provider configured).', 'otp' => $otp]);
+            \json_response(['ok' => true, 'message' => 'OTP generated (no email provider configured).', 'otp'] : $otp);
             return;
         }
         \json_response(['ok' => true, 'message' => 'If a matching account was found, an OTP has been sent.']);
