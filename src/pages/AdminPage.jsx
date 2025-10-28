@@ -36,6 +36,14 @@ export default function AdminPage() {
   // Tabs
   const [activeTab, setActiveTab] = useState('dashboard')
 
+  // Env status (email config diagnostics)
+  const [envStatus, setEnvStatus] = useState(null)
+  const [testEmail, setTestEmail] = useState('')
+
+  // Diagnostics (API/functions)
+  const [diagChecks, setDiagChecks] = useState([])
+  const [diagRunning, setDiagRunning] = useState(false)
+
   // Approvals
   const [pending, setPending] = useState([])
   const [selectedId, setSelectedId] = useState(null)
@@ -508,6 +516,44 @@ export default function AdminPage() {
     })
   }
 
+  // Env status helpers
+  async function fetchEnvStatus() {
+    try {
+      const r = await fetch('/api/admin/env-status', { headers: getAdminHeaders(), cache: 'no-store' })
+      const data = await safeJson(r)
+      if (!r.ok) throw new Error(data.error || 'Failed to load env status')
+      setEnvStatus(data.env || {})
+    } catch (e) {
+      setStatus(`Error: ${e.message}`)
+    }
+  }
+  useEffect(() => {
+    if (activeTab === 'env') {
+      fetchEnvStatus()
+    } else if (activeTab === 'diagnostics') {
+      runDiagnostics()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab])
+
+  async function sendTestEmail() {
+    const email = String(testEmail || '').trim().toLowerCase()
+    if (!email) { setStatus('Enter a test email address.'); return }
+    try {
+      const payload = { title: 'Test email', message: 'This is a test email from Ganudenu admin.', targetEmail: email, sendEmail: true }
+      const r = await fetch('/api/admin/notifications', {
+        method: 'POST',
+        headers: getAdminHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(payload)
+      })
+      const data = await safeJson(r)
+      if (!r.ok) throw new Error(data.error || 'Failed to send test email')
+      setStatus('Test notification created. If email is configured, a message should arrive shortly.')
+    } catch (e) {
+      setStatus(`Error: ${e.message}`)
+    }
+  }
+
   // Reports
   async function loadReports(filter = 'pending') {
     try {
@@ -786,7 +832,7 @@ export default function AdminPage() {
       const blob = await r.blob()
       const cd = (r.headers && r.headers.get && r.headers.get('content-disposition')) ? String(r.headers.get('content-disposition')) : ''
       let filename = 'ganudenu-backup.zip'
-      const m = cd.match(/filename="([^"]+)"/)
+      const m = cd.match(/filename=\"([^\"]+)\"/)
       if (m && m[1]) filename = m[1]
       const url = window.URL.createObjectURL(blob)
       const a = document.createElement('a')
@@ -943,6 +989,7 @@ export default function AdminPage() {
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8, marginBottom: 8 }}>
           {[
             { key: 'dashboard', label: 'Dashboard' },
+            { key: 'env', label: 'Env' },
             { key: 'users', label: 'Users' },
             { key: 'reports', label: 'Reports' },
             { key: 'banners', label: 'Banners' },
@@ -1108,6 +1155,62 @@ export default function AdminPage() {
           </>
         )}
 
+        {/* Env Status */}
+        {activeTab === 'env' && (
+          <>
+            <div className="h2" style={{ marginTop: 8 }}>Environment & Email Diagnostics</div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <button className="btn" onClick={fetchEnvStatus}>Refresh</button>
+              <span className="text-muted">Check whether SMTP/Brevo are configured and send a test email.</span>
+            </div>
+            <div className="card" style={{ marginTop: 8 }}>
+              {!envStatus && <p className="text-muted">Loading env status…</p>}
+              {envStatus && (
+                <>
+                  <div className="grid two" style={{ gap: 8 }}>
+                    <div>
+                      <div className="h2" style={{ marginTop: 0 }}>App</div>
+                      <div className="text-muted">APP_ENV: {String(envStatus.APP_ENV || 'n/a')}</div>
+                      <div className="text-muted">PUBLIC_ORIGIN: {String(envStatus.PUBLIC_ORIGIN || 'n/a')}</div>
+                      <div className="text-muted">PUBLIC_DOMAIN: {String(envStatus.PUBLIC_DOMAIN || 'n/a')}</div>
+                    </div>
+                    <div>
+                      <div className="h2" style={{ marginTop: 0 }}>Email</div>
+                      <div className="text-muted">EMAIL_DEV_MODE: {String(envStatus.EMAIL_DEV_MODE || 'false')}</div>
+                      <div className="text-muted">SMTP_HOST: {envStatus.SMTP_HOST ? String(envStatus.SMTP_HOST) : 'not set'}</div>
+                      <div className="text-muted">SMTP_PORT: {envStatus.SMTP_PORT || 'n/a'}</div>
+                      <div className="text-muted">SMTP_SECURE: {String(envStatus.SMTP_SECURE || 'false')}</div>
+                      <div className="text-muted">SMTP_USER: {envStatus.SMTP_USER_masked || 'n/a'}</div>
+                      <div className="text-muted">SMTP_PASS_set: {envStatus.SMTP_PASS_set ? 'yes' : 'no'}</div>
+                      <div className="text-muted">SMTP_FROM: {envStatus.SMTP_FROM || 'n/a'}</div>
+                      <div className="text-muted">BREVO_API_KEY_set: {envStatus.BREVO_API_KEY_set ? 'yes' : 'no'}</div>
+                      <div className="text-muted">BREVO_LOGIN: {envStatus.BREVO_LOGIN_masked || 'n/a'}</div>
+                    </div>
+                  </div>
+                  {(!envStatus.SMTP_HOST && !envStatus.BREVO_API_KEY_set) && (
+                    <div className="card" style={{ marginTop: 8, background: 'rgba(239,68,68,0.08)', borderColor: '#ef44441a' }}>
+                      <strong>Email provider not configured</strong>
+                      <div className="text-muted" style={{ marginTop: 6 }}>
+                        Set SMTP_* or BREVO_* variables on your server. Until then, OTP flows will return codes in the API when simulation applies.
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+            <div className="card" style={{ marginTop: 8 }}>
+              <div className="h2" style={{ marginTop: 0 }}>Send Test Email</div>
+              <div className="grid two">
+                <input className="input" placeholder="recipient@example.com" value={testEmail} onChange={e => setTestEmail(e.target.value)} />
+                <button className="btn primary" onClick={sendTestEmail}>Send</button>
+              </div>
+              <small className="text-muted" style={{ display: 'block', marginTop: 6 }}>
+                Uses the admin notifications endpoint with sendEmail=true. Check your inbox and spam folder.
+              </small>
+            </div>
+          </>
+        )}
+
         {/* Users */}
         {activeTab === 'users' && (
           <>
@@ -1136,15 +1239,6 @@ export default function AdminPage() {
                   <button className="btn" onClick={() => loadUsers(userQuery)}>Search</button>
                   <button className="btn" onClick={() => { setUserQuery(''); setUserSelect(''); loadUsers(''); }}>Reset</button>
                 </div>
-              </div>
-            </div>
-            <div className="grid two" style={{ marginTop: 8 }}>
-              <div>
-                <label className="text-muted">Suspend days</label>
-                <input className="input" type="number" min="1" max="365" value={suspendDays} onChange={e => setSuspendDays(Math.max(1, Math.min(365, Number(e.target.value || 1))))} />
-              </div>
-              <div className="text-muted" style={{ display: 'flex', alignItems: 'center' }}>
-                This value is used when clicking “Suspend” on a user.
               </div>
             </div>
             <div className="grid two" style={{ marginTop: 8 }}>
@@ -1231,8 +1325,12 @@ export default function AdminPage() {
           </>
         )}
 
-        {/* Banners */}
-        {activeTab === 'banners' && (
+        {/* Diagnostics */}
+        {activeTab === 'diagnostics' && (
+          <>
+           < div className="h2" style={{ marginTop: 8 }}>System Diagnosti</csdiv>
+           < div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+             < button className="btn" onClick={runDiagnostics} disabled={diagRunning}>{diagRunning ? 'Running…' : '&& (
           <>
             <div className="h2" style={{ marginTop: 8 }}>Banners</div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>

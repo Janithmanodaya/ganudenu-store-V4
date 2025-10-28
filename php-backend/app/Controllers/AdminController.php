@@ -9,6 +9,219 @@ use App\Services\SecureConfig;
 
 class AdminController
 {
+    public static function diagnostics(): void
+    {
+        $admin = self::requireAdmin(); if (!$admin) return;
+
+        $checks = [];
+
+        // Helper to add a check
+        $add = function (string $key, bool $ok, string $message = '', array $extra = []) use (&$checks) {
+            $checks[] = ['key' => $key, 'ok' => $ok, 'message' => $message, 'extra' => $extra];
+        };
+
+        // Resolve base URL for loopback HTTP tests
+        $resolveBase = function (): string {
+            $base = getenv('PUBLIC_ORIGIN') ?: (getenv('APP_URL') ?: '');
+            if ($base) return $base;
+            $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+            $host = $_SERVER['HTTP_HOST'] ?? '';
+            if ($host) return $scheme . '://' . $host;
+            return 'http://localhost:5174';
+        };
+        $baseUrl = $resolveBase();
+
+        // Lightweight HTTP GET helper (stream)
+        $httpGet = function (string $url, array $headers = [], int $timeout = 8): array {
+            $hdr = $headers ?: [];
+            if (!array_filter($hdr, fn($h) => stripos($h, 'User-Agent:') === 0)) {
+                $hdr[] = 'User-Agent: ganudenu-admin-diagnostics';
+            }
+            $hdr[] = 'Connection: close';
+            $ctx = stream_context_create([
+                'http' => [
+                    'method' => 'GET',
+                    'header' => implode("\r\n", $hdr),
+                    'timeout' => max(5, $timeout),
+                    'ignore_errors' => true,
+                    'protocol_version' => 1.1
+                ]
+            ]);
+            $body = @file_get_contents($url, false, $ctx);
+            $status = 0;
+            $ct = '';
+            if (isset($http_response_header) && is_array($http_response_header)) {
+                foreach ($http_response_header as $h) {
+                    if (preg_match('#^HTTP/\d(?:\.\d)?\s+(\d{3})#', $h, $m)) { $status = (int)$m[1]; }
+                    if (stripos($h, 'Content-Type:') === 0) { $ct = trim(substr($h, strlen('Content-Type:'))); }
+                }
+            }
+            return ['status' => $status, 'body' => is_string($body) ? $body : '', 'content_type' => strtolower($ct)];
+        };
+
+        // 1) Database connectivity and schema basics
+        try {
+            $one = DB::one('SELECT 1 AS x');
+            $ok = isset($one['x']) && (int)$one['x'] === 1;
+            $add('db_connect', $ok, $ok ? 'Database reachable.' : 'Database probe failed.');
+        } catch (\Throwable $e) {
+            $add('db_connect', false, 'Database error: ' . substr($e->getMessage(), 0, 200));
+        }
+        // Required tables existence
+        $requiredTables = ['users','listings','notifications','otps'];
+        foreach ($requiredTables as $t) {
+            try {
+                $row = DB::one("SELECT name FROM sqlite_master WHERE type='table' AND name = ?", [$t]);
+                $ok = !empty($row['name']);
+                $add("table:{$t}", $ok, $ok ? 'OK' : "Missing table: {$t}");
+            } catch (\Throwable $e) {
+                $add("table:{$t}", false, 'Error checking table: ' . substr($e->getMessage(), 0, 200));
+            }
+        }
+
+        // 2) Filesystem: uploads directory
+        $uploadsDir = null;
+        try {
+            $base = realpath(__DIR__ . '/../../..') ?: (__DIR__ . '/../../..');
+            $uploadsDir = $base . '/data/uploads';
+            if (!is_dir($uploadsDir)) @mkdir($uploadsDir, 0775, true);
+            $ok = is_dir($uploadsDir) && is_writable($uploadsDir);
+            $add('fs_uploads_dir', $ok, $ok ? 'uploads/ exists and is writable.' : 'uploads/ not writable or missing.', ['path' => $uploadsDir]);
+        } catch (\Throwable $e) {
+            $add('fs_uploads_dir', false, 'Error checking uploads dir: ' . substr($e->getMessage(), 0, 200));
+        }
+
+        // 3) JWT secret
+        $jwtSet = !!(getenv('JWT_SECRET') ?: '');
+        $add('jwt_secret', $jwtSet, $jwtSet ? 'JWT secret configured.' : 'JWT_SECRET not set.');
+
+        // 4) Public origin/domain configuration
+        $pubOrigin = getenv('PUBLIC_ORIGIN') ?: '';
+        $pubDomain = getenv('PUBLIC_DOMAIN') ?: '';
+        $add('public_origin', $pubOrigin !== '', $pubOrigin ? "PUBLIC_ORIGIN={$pubOrigin}" : 'PUBLIC_ORIGIN not set.');
+        $add('public_domain', $pubDomain !== '', $pubDomain ? "PUBLIC_DOMAIN={$pubDomain}" : 'PUBLIC_DOMAIN not set.');
+
+        // 5) Email providers readiness
+        $smtpHost = getenv('SMTP_HOST') ?: '';
+        $smtpUser = getenv('SMTP_USER') ?: '';
+        $smtpPass = getenv('SMTP_PASS') ?: '';
+        $smtpFrom = getenv('SMTP_FROM') ?: '';
+        $brevoKey = getenv('BREVO_API_KEY') ?: '';
+        $brevoLogin = getenv('BREVO_LOGIN') ?: '';
+        $emailDev = strtolower(getenv('EMAIL_DEV_MODE') ?: '') === 'true';
+
+        $smtpOk = ($smtpHost && $smtpUser && $smtpPass);
+        $brevoOk = ($brevoKey && $brevoLogin);
+        $emailConfigured = $smtpOk || $brevoOk;
+
+        $add('email_config', $emailConfigured, $emailConfigured ? 'Email provider configured.' : 'No email provider configured.', [
+            'smtp' => ['host' => $smtpHost ?: null, 'user_set' => $smtpUser ? true : false, 'pass_set' => $smtpPass ? true : false, 'from' => $smtpFrom ?: null],
+            'brevo' => ['api_key_set' => $brevoKey ? true : false, 'login' => $brevoLogin ?: null],
+            'dev_mode' => $emailDev
+        ]);
+
+        // 6) Google OAuth strict validation
+        $gid = getenv('GOOGLE_CLIENT_ID') ?: '';
+        $gsecret = getenv('GOOGLE_CLIENT_SECRET') ?: '';
+        $gredir = getenv('GOOGLE_REDIRECT_URI') ?: '';
+        $gMsg = '';
+        $gOk = false;
+        try {
+            if (!$gid || !$gsecret || !$gredir) {
+                $gMsg = 'Missing client id/secret or redirect URI.';
+            } else {
+                $scheme = (string)(parse_url($gredir, PHP_URL_SCHEME) ?: '');
+                $host = (string)(parse_url($gredir, PHP_URL_HOST) ?: '');
+                $port = parse_url($gredir, PHP_URL_PORT);
+                $path = (string)(parse_url($gredir, PHP_URL_PATH) ?: '');
+                $isLocal = ($host === 'localhost' || $host === '127.0.0.1');
+                if ($path !== '/api/auth/google/callback') {
+                    $gMsg = 'Redirect path must be exactly /api/auth/google/callback.';
+                } elseif (!$isLocal && strtolower($scheme) !== 'https') {
+                    $gMsg = 'Non-localhost domains must use HTTPS for redirect URI.';
+                } elseif ($isLocal && (int)($port ?? 80) === 5173) {
+                    $gMsg = 'Local redirect cannot use Vite dev port 5173. Use backend on 5174.';
+                } else {
+                    // Optional: match APP_URL host/port/scheme if set
+                    $appUrl = getenv('APP_URL') ?: '';
+                    if ($appUrl) {
+                        $appHost = (string)(parse_url($appUrl, PHP_URL_HOST) ?: '');
+                        $appPort = parse_url($appUrl, PHP_URL_PORT);
+                        $appScheme = (string)(parse_url($appUrl, PHP_URL_SCHEME) ?: '');
+                        if ($appHost && $host && strtolower($appHost) !== strtolower($host)) {
+                            $gMsg = 'GOOGLE_REDIRECT_URI host does not match APP_URL.';
+                        } elseif ($appPort !== null && $port !== null && (int)$appPort !== (int)$port) {
+                            $gMsg = 'GOOGLE_REDIRECT_URI port does not match APP_URL.';
+                        } elseif (!$isLocal && $appScheme && strtolower($scheme) !== strtolower($appScheme)) {
+                            $gMsg = 'GOOGLE_REDIRECT_URI scheme does not match APP_URL.';
+                        } else {
+                            $gOk = true;
+                            $gMsg = 'Google OAuth appears strictly valid.';
+                        }
+                    } else {
+                        $gOk = true;
+                        $gMsg = 'Google OAuth appears strictly valid.';
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            $gMsg = 'Google OAuth validation error: ' . substr($e->getMessage(), 0, 200);
+        }
+        $add('google_oauth_strict', $gOk, $gMsg, ['redirect_uri' => $gredir ?: null, 'client_id_set' => $gid ? true : false, 'client_secret_set' => $gsecret ? true : false]);
+
+        // 7) CORS origins parse
+        $cors = getenv('CORS_ORIGINS') ?: '';
+        $corsList = array_filter(array_map('trim', explode(',', $cors)));
+        $add('cors_origins', true, 'CORS_ORIGINS parsed.', ['origins' => $corsList]);
+
+        // 8) Front-controller API route test via /api/index.php?r=/api/health
+        try {
+            $fcUrl = rtrim($baseUrl, '/') . '/api/index.php?r=' . urlencode('/api/health?diag=1');
+            $res = $httpGet($fcUrl, ['Accept: application/json']);
+            $ok = ($res['status'] >= 200 && $res['status'] < 300 && str_contains($res['content_type'], 'application/json') && str_contains($res['body'] ?? '', '"ok":true'));
+            $add('front_controller_api', $ok, $ok ? 'Front-controller API routing OK.' : 'Front-controller API routing failed.', ['url' => $fcUrl, 'status' => $res['status'], 'content_type' => $res['content_type']]);
+        } catch (\Throwable $e) {
+            $add('front_controller_api', false, 'Error testing front-controller API: ' . substr($e->getMessage(), 0, 200));
+        }
+
+        // 9) Front-controller uploads serving test: create temp file and fetch via r=/uploads/<name>
+        try {
+            if ($uploadsDir) {
+                @mkdir($uploadsDir, 0775, true);
+                $name = 'diag_' . bin2hex(random_bytes(4)) . '.txt';
+                $path = rtrim($uploadsDir, '/\\') . '/' . $name;
+                @file_put_contents($path, 'DIAG-OK');
+                $uUrl = rtrim($baseUrl, '/') . '/api/index.php?r=' . urlencode('/uploads/' . $name);
+                $res = $httpGet($uUrl, ['Accept: */*']);
+                $ok = ($res['status'] === 200 && ($res['content_type'] === 'application/octet-stream' || str_starts_with($res['content_type'], 'text/')) && str_contains($res['body'] ?? '', 'DIAG-OK'));
+                $add('front_controller_uploads', $ok, $ok ? 'Uploads served via front-controller.' : 'Uploads front-controller serving failed.', ['url' => $uUrl, 'status' => $res['status'], 'content_type' => $res['content_type']]);
+                @unlink($path);
+            } else {
+                $add('front_controller_uploads', false, 'Uploads directory unknown.');
+            }
+        } catch (\Throwable $e) {
+            $add('front_controller_uploads', false, 'Error testing uploads serving: ' . substr($e->getMessage(), 0, 200));
+        }
+
+        // 10) SSE connectivity check (maintenance-status stream)
+        try {
+            $sseUrl = rtrim($baseUrl, '/') . '/api/maintenance-status/stream';
+            $res = $httpGet($sseUrl, ['Accept: text/event-stream']);
+            // We expect text/event-stream and body to contain "event:" or "data:" lines
+            $body = substr((string)$res['body'], 0, 256);
+            $isEventStream = str_contains($res['content_type'], 'text/event-stream') || str_contains($body, 'data:') || str_contains($body, 'event:');
+            $ok = ($res['status'] >= 200 && $res['status'] < 300 && $isEventStream);
+            $add('sse_maintenance_stream', $ok, $ok ? 'SSE endpoint reachable.' : 'SSE endpoint failed or wrong content-type.', ['url' => $sseUrl, 'status' => $res['status'], 'content_type' => $res['content_type'], 'body_snippet' => $body]);
+        } catch (\Throwable $e) {
+            $add('sse_maintenance_stream', false, 'Error testing SSE endpoint: ' . substr($e->getMessage(), 0, 200));
+        }
+
+        // 11) Basic runtime health
+        $add('runtime', true, 'Diagnostics executed.', ['base_url' => $baseUrl]);
+
+        \json_response(['ok' => true, 'checks' => $checks]);
+    }
+
     public static function envStatus(): void
     {
         $admin = self::requireAdmin(); if (!$admin) return;
