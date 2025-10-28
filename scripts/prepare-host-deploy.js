@@ -100,6 +100,14 @@ Header set Referrer-Policy "no-referrer-when-downgrade"
 Header set Permissions-Policy "geolocation=(), microphone=(), camera=()"
 </IfModule>
 
+# Ensure correct MIME types for JS/CSS even on strict hosts
+<IfModule mod_mime.c>
+AddType application/javascript .js
+AddType application/javascript .mjs
+AddType application/javascript .jsx
+AddType text/css .css
+</IfModule>
+
 # Route API and uploads requests to PHP backend
 RewriteCond %{REQUEST_URI} ^${apiRoute} [NC]
 RewriteRule ^ ${backendTarget} [L]

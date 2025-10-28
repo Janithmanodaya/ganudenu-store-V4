@@ -149,9 +149,19 @@ function set_auth_cookie(string $token): void {
             $domainAttr = $cookieDomain;
         }
     }
-    // Same rule as controllers: SameSite=None requires Secure; in dev use Lax.
-    $sameSite = $isProd ? 'None' : 'Lax';
-    $secure = $isProd ? true : false;
+    // Determine if current request is effectively HTTPS (direct or via proxy)
+    $https = false;
+    if (!empty($_SERVER['HTTPS']) && strtolower((string)$_SERVER['HTTPS']) !== 'off') {
+        $https = true;
+    } elseif (!empty($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower((string)$_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https') {
+        $https = true;
+    } elseif (!empty($_SERVER['HTTP_X_FORWARDED_SSL']) && strtolower((string)$_SERVER['HTTP_X_FORWARDED_SSL']) === 'on') {
+        $https = true;
+    }
+
+    // SameSite=None requires Secure; fall back to Lax on HTTP so cookies work on non-HTTPS hosts.
+    $secure = $https;
+    $sameSite = $secure ? 'None' : 'Lax';
 
     $params = [
         'expires' => time() + 7 * 24 * 60 * 60,
