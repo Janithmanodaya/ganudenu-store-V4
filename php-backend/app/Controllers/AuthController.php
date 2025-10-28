@@ -818,6 +818,11 @@ class AuthController
             \json_response(['error' => 'Failed to send OTP email.', 'detail' => $detail], 502);
             return;
         }
+        // If email was simulated (no provider configured), return the OTP so user can proceed.
+        if (!empty($sent['simulated'])) {
+            \json_response(['ok' => true, 'message' => 'OTP generated (no email provider configured).', 'otp' => $otp]);
+            return;
+        }
         \json_response(['ok' => true, 'message' => 'OTP sent successfully.']);
     }
 
@@ -900,6 +905,10 @@ class AuthController
         if (!$sent['ok']) {
             DB::exec("DELETE FROM otps WHERE email = ? AND otp = ?", [$email, $otp]);
             \json_response(['error' => 'Failed to send OTP email.'], 502);
+            return;
+        }
+        if (!empty($sent['simulated'])) {
+            \json_response(['ok' => true, 'otp_required' => true, 'is_admin' => !!$user['is_admin'], 'message' => 'OTP generated (no email provider configured).', 'otp' => $otp]);
             return;
         }
         \json_response(['ok' => true, 'otp_required' => true, 'is_admin' => !!$user['is_admin'], 'message' => 'OTP sent to your email.']);
@@ -1001,6 +1010,10 @@ class AuthController
         if (!$sent['ok']) {
             DB::exec("DELETE FROM otps WHERE email = ? AND otp = ?", [$email, $otp]);
             \json_response(['error' => 'Failed to send OTP email.'], 502);
+            return;
+        }
+        if (!empty($sent['simulated'])) {
+            \json_response(['ok' => true, 'message' => 'OTP generated (no email provider configured).', 'otp' => $otp]);
             return;
         }
         \json_response(['ok' => true, 'message' => 'If a matching account was found, an OTP has been sent.']);

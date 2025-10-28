@@ -1,8 +1,9 @@
 /**
- * Global API polyfill for hosts without proper /api rewrites.
- * - Wraps window.fetch: if a relative /api request returns HTML (likely index.html), retry via /api/index.php?r=<path>
- * - Wraps window.EventSource: always transform /api/* URLs to /api/index.php?r=<path> in production builds.
- * - No changes in dev (Vite proxy handles /api).
+ * Global API and asset polyfills for hosts without proper rewrites.
+ * - fetch: if a relative /api request returns HTML (likely index.html), retry via /api/index.php?r=<path>
+ * - EventSource: in production, rewrite /api/* to /api/index.php?r=<path>
+ * - Image src: in production, rewrite /uploads/* to /api/index.php?r=/uploads/* to survive hosts without PHP rewrites
+ * - Also upgrade same-origin http:// URLs to https:// when the page is on https (avoid mixed-content blocking)
  */
 
 const IS_DEV = typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.DEV
@@ -34,10 +35,53 @@ function isApiRelativeUrl(u) {
 
 function buildFrontControllerUrl(pathLike) {
   const base = '/api/index.php'
-  const hasQ = String(pathLike || '').includes('?')
   const urlWithQuery = String(pathLike || '')
   const fc = `${base}?r=${encodeURIComponent(urlWithQuery)}`
   return fc
+}
+
+function sameOrigin(urlStr) {
+  try {
+    const u = new URL(urlStr, window.location.origin)
+    return u.origin === window.location.origin
+  } catch {
+    return false
+  }
+}
+
+function maybeUpgradeToHttps(urlStr) {
+  try {
+    if (window.location.protocol !== 'https:') return urlStr
+    const u = new URL(urlStr, window.location.origin)
+    if (u.protocol === 'http:' && u.hostname === window.location.hostname) {
+      u.protocol = 'https:'
+      return u.toString()
+    }
+  } catch {}
+  return urlStr
+}
+
+function normalizeAssetUrl(urlStr) {
+  // Only active in production builds
+  if (IS_DEV) return urlStr
+  if (!urlStr) return urlStr
+  try {
+    // Rewrite relative /uploads/* to front-controller override to bypass missing rewrites on shared hosts
+    if (urlStr.startsWith('/uploads/')) {
+      return buildFrontControllerUrl(urlStr)
+    }
+    // Absolute same-origin /uploads paths
+    if (sameOrigin(urlStr)) {
+      const u = new URL(urlStr, window.location.origin)
+      if (u.pathname.startsWith('/uploads/')) {
+        return buildFrontControllerUrl(u.pathname + (u.search || ''))
+      }
+    }
+    // Avoid mixed content if page is https and URL is same-origin http
+    return maybeUpgradeToHttps(urlStr)
+  } catch {
+    return urlStr
+  }
 }
 
 // Wrap fetch with fallback retry
@@ -111,5 +155,47 @@ function EventSourcePolyfill(url, ...args) {
 // Preserve basic prototype reference to avoid breaking instanceof checks
 EventSourcePolyfill.prototype = OrigEventSource.prototype
 
-// Install
+// Install EventSource polyfill
 window.EventSource = EventSourcePolyfill
+
+// Install global IMG src normalizer (production only)
+;(function installImageSrcRewrite() {
+  if (IS_DEV) return
+  try {
+    const desc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src')
+    if (desc && desc.set) {
+      const origSet = desc.set
+      Object.defineProperty(HTMLImageElement.prototype, 'src', {
+        configurable: true,
+        enumerable: desc.enumerable,
+        get: desc.get,
+        set(value) {
+          try {
+            const v = String(value || '')
+            const norm = normalizeAssetUrl(v)
+            return origSet.call(this, norm)
+          } catch {
+            return origSet.call(this, value)
+          }
+        }
+      })
+    }
+    // Also patch setAttribute for safety when setting src via attributes
+    const origSetAttr = Element.prototype.setAttribute
+    Element.prototype.setAttribute = function(name, value) {
+      if (!name || typeof name !== 'string') return origSetAttr.call(this, name, value)
+      if (name.toLowerCase() === 'src' && this instanceof HTMLImageElement) {
+        try {
+          const v = String(value || '')
+          const norm = normalizeAssetUrl(v)
+          return origSetAttr.call(this, name, norm)
+        } catch {
+          // fallthrough
+        }
+      }
+      return origSetAttr.call(this, name, value)
+    }
+  } catch {
+    // ignore
+  }
+})()
