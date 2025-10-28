@@ -30,6 +30,8 @@ if %errorlevel% neq 0 (
 )
 
 echo [build] Building frontend and preparing host-deploy...
+set BACKEND_DIR=php-backend
+echo [config] Using backend output folder: %BACKEND_DIR% (PUBLIC_API_ROUTE=/api)
 node "%ROOT%scripts\prepare-host-deploy.js"
 if %errorlevel% neq 0 (
   echo [error] Failed to prepare host deploy.
@@ -39,7 +41,7 @@ if %errorlevel% neq 0 (
 echo.
 echo Host deploy prepared in host-deploy\
 echo - Frontend build copied
-echo - Backend copied to host-deploy\api (vendor\ included if installed)
+echo - Backend copied to host-deploy\%BACKEND_DIR% (vendor\ included if installed)
 echo Upload all files inside host-deploy\ to your hosting public_html.
 echo.
 endlocal

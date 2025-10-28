@@ -20,7 +20,16 @@ import { execSync } from 'child_process';
 const ROOT = process.cwd();
 const DIST = path.join(ROOT, 'dist');
 const OUT = path.join(ROOT, 'host-deploy');
-const API_OUT = path.join(OUT, 'api');
+
+// Allow overriding backend output folder name (default 'api') via env
+let BACKEND_DIR = (process.env.BACKEND_DIR || 'api').replace(/^[\\/]+|[\\/]+$/g, '');
+if (!BACKEND_DIR) BACKEND_DIR = 'api';
+
+// Public API route path (what the frontend calls). Default '/api'
+let PUBLIC_API_ROUTE = process.env.PUBLIC_API_ROUTE || '/api';
+if (!PUBLIC_API_ROUTE.startsWith('/')) PUBLIC_API_ROUTE = `/${PUBLIC_API_ROUTE}`;
+
+const API_OUT = path.join(OUT, BACKEND_DIR);
 const API_VAR = path.join(API_OUT, 'var');
 const API_UPLOADS = path.join(API_VAR, 'uploads');
 const PHP_BACKEND = path.join(ROOT, 'php-backend');
@@ -77,6 +86,9 @@ function ensureBuilt() {
 }
 
 function writeRootHtaccess() {
+  const backendTarget = `${BACKEND_DIR}/index.php`;
+  const apiRoute = PUBLIC_API_ROUTE; // already normalized to start with '/'
+
   const ht = `
 RewriteEngine On
 
@@ -89,11 +101,11 @@ Header set Permissions-Policy "geolocation=(), microphone=(), camera=()"
 </IfModule>
 
 # Route API and uploads requests to PHP backend
-RewriteCond %{REQUEST_URI} ^/api [NC]
-RewriteRule ^ api/index.php [L]
+RewriteCond %{REQUEST_URI} ^${apiRoute} [NC]
+RewriteRule ^ ${backendTarget} [L]
 
 RewriteCond %{REQUEST_URI} ^/uploads [NC]
-RewriteRule ^ api/index.php [L]
+RewriteRule ^ ${backendTarget} [L]
 
 # Serve existing files directly
 RewriteCond %{REQUEST_FILENAME} -f [OR]
@@ -204,18 +216,19 @@ function fixApiIndexRequire() {
   if (!fs.existsSync(idx)) return;
   let src = fs.readFileSync(idx, 'utf8');
   // Adjust require path from ../app/bootstrap.php (original path under public/)
-  // to ./app/bootstrap.php (since app/ is inside api/)
+  // to ./app/bootstrap.php (since app/ is inside backend dir)
   const before = "/../app/bootstrap.php";
   const after = "/app/bootstrap.php";
   if (src.includes(before)) {
     src = src.replace(before, after);
     fs.writeFileSync(idx, src, 'utf8');
-    log('Patched api/index.php require path to /app/bootstrap.php');
+    log(`Patched ${BACKEND_DIR}/index.php require path to /app/bootstrap.php`);
   }
 }
 
 function main() {
   log('Preparing host-friendly deploy for ganudenu.store');
+  log(`Using backend output folder: ${BACKEND_DIR} (PUBLIC_API_ROUTE=${PUBLIC_API_ROUTE})`);
   ensureBuilt();
   createOutStructure();
   copyFrontend();
@@ -226,7 +239,7 @@ function main() {
   writeApiEnv();
 
   log('Done. Upload the contents of host-deploy/ to your hosting public_html.');
-  log('On the host, ensure api/var and api/var/uploads are writable by the web server (usually 775 or 755).');
+  log(`On the host, ensure ${BACKEND_DIR}/var and ${BACKEND_DIR}/var/uploads are writable by the web server (usually 775 or 755).`);
 }
 
 main();
