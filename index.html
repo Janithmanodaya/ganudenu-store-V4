@@ -75,9 +75,25 @@
       }
 
       async function loadBuiltViaManifest() {
-        const r = await fetch('/assets/manifest.json', { cache: 'no-store' });
-        if (!r.ok) throw new Error('manifest missing');
-        const man = await r.json();
+        // Vite writes manifest.json at the build root by default (e.g., /manifest.json).
+        // Some setups may place it under /assets/manifest.json. Try both.
+        async function tryFetchManifest(url) {
+          try {
+            const r = await fetch(url, { cache: 'no-store' });
+            if (!r.ok) return null;
+            const ct = String(r.headers.get('content-type') || '').toLowerCase();
+            if (!ct.includes('json')) {
+              // Still attempt to parse; some hosts mislabel content-type
+            }
+            const man = await r.json().catch(() => null);
+            return man || null;
+          } catch (_) { return null; }
+        }
+
+        var man = await tryFetchManifest('/manifest.json');
+        if (!man) man = await tryFetchManifest('/assets/manifest.json');
+        if (!man) throw new Error('manifest missing');
+
         // Prefer known keys
         var keys = ['src/main.jsx', 'src/main.tsx', 'src/main.js'];
         var entry = null;
