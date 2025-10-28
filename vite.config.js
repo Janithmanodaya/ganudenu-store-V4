@@ -58,6 +58,8 @@ function devMaintenanceStatusFallback() {
 }
 
 export default defineConfig({
+  // Use relative paths in the built index.html so deployments in subdirectories work (assets -> ./assets)
+  base: './',
   plugins: [
     devMaintenanceStatusFallback(),
     react()
