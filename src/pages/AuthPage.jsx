@@ -135,7 +135,7 @@ export default function AuthPage() {
 
   // Centralized API fetch with proxy fallback:
   // 1) Try relative /api (same-origin in prod, Vite proxy in dev)
-  // 2) If response looks like HTML (likely index.html due to proxy miss), retry through PHP front-controller fallback: /api/index.php?r=<path>
+  // 2) If response is HTML or not OK (e.g., 4xx/5xx), retry through PHP front-controller fallback: /api/index.php?r=<path>
   //    This works on shared hosts without rewrite rules because php-backend/public/index.php supports the `r` override.
   async function apiFetch(path, options) {
     const rel = await fetch(path, options).catch(() => null)
@@ -143,8 +143,8 @@ export default function AuthPage() {
     const relData = await safeJson(rel)
     const isHtml = relData && relData._html === true
 
-    // If HTML was returned (proxy misconfig), retry via /api/index.php?r=<route>
-    if (isHtml || (!rel.ok && (rel.status === 200))) {
+    // If HTML was returned (proxy misconfig), or non-OK status (e.g., 502), retry via /api/index.php?r=<route>
+    if (isHtml || !rel.ok) {
       try {
         const fcUrl = `/api/index.php?r=${encodeURIComponent(path)}`
         const retryResp = await fetch(fcUrl, options)

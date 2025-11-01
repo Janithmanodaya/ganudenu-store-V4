@@ -102,6 +102,10 @@ window.fetch = async function(input, init) {
     // Network error: if it's an /api/* call, try front-controller once
     if (shouldCheck) {
       const urlStr = typeof input === 'string' ? input : (input && input.url) ? String(input.url) : ''
+      // Avoid infinite recursion if already targeting the front controller
+      if (String(urlStr).startsWith('/api/index.php')) {
+        return null
+      }
       const retryUrl = buildFrontControllerUrl(urlStr)
       try { return await origFetch(retryUrl, init) } catch { return null }
     }
@@ -131,6 +135,10 @@ window.fetch = async function(input, init) {
     // Retry when HTML fallback OR any non-OK status (e.g., 502 Bad Gateway from proxies)
     if (isHtml || !resp.ok) {
       const urlStr = typeof input === 'string' ? input : (input && input.url) ? String(input.url) : ''
+      // Avoid infinite recursion if already on the front controller
+      if (String(urlStr).startsWith('/api/index.php')) {
+        return resp
+      }
       const retryUrl = buildFrontControllerUrl(urlStr)
       try {
         const retryResp = await origFetch(retryUrl, init)
